@@ -32,7 +32,7 @@ import matplotlib.pyplot as plt
 
 from PIL import Image
 from tqdm import tqdm
-from utils.dataset import TrainDataset, ImageDataset
+from utils.dataset import TrainDataset, InferDataset
 ###
 
 
@@ -55,7 +55,8 @@ parser.add_argument('--norm', default='instance', help='batch or instance')
 parser.add_argument('--loss', default='l2', help='l1 or l2')
 parser.add_argument('--channel_cover', type=int, default=3, help='1: gray; 3: color')
 parser.add_argument('--channel_secret', type=int, default=3, help='1: gray; 3: color')
-parser.add_argument('--iters_per_epoch', type=int, default=2000, help='1: gray; 3: color')
+parser.add_argument('--max_val_iters', type=int, default=200)
+parser.add_argument('--max_train_iters', type=int, default=2000)
 
 parser.add_argument('--bs_train', type=int, default=16, help='training batch size')
 parser.add_argument('--bs_generate', type=int, default=16, help='generation batch size')
@@ -98,7 +99,7 @@ def main():
 
     opt = parser.parse_args()
     opt.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    print("Running on device: {}".format(opt.device))
+    print("[*]Running on device: {}".format(opt.device))
 
     cudnn.benchmark = True
 
@@ -110,7 +111,7 @@ def main():
             cover_comment = 'color' if opt.channel_cover == 3 else 'gray'
             comment = secret_comment+'_In_'+cover_comment
             opt.experiment_dir = os.path.join(opt.output_dir, cur_time+"_"+str(opt.imageSize)+"_"+opt.norm+"_"+opt.loss+"_"+str(opt.beta)+"_"+comment)
-            print("Saving the experiment results at {}".format(opt.experiment_dir))
+            print("[*]Saving the experiment results at {}".format(opt.experiment_dir))
 
             opt.outckpts = os.path.join(opt.experiment_dir, "CheckPoints")
             os.makedirs(opt.outckpts, exist_ok=True)
@@ -130,32 +131,32 @@ def main():
 
         elif opt.mode == 'generate':
             opt.experiment_dir = opt.output_dir
-            print("Saving the generation results at {}".format(opt.experiment_dir))
+            print("[*]Saving the generation results at {}".format(opt.experiment_dir))
 
             opt.outlogs = os.path.join(opt.experiment_dir, "GeneratingLogs")
             os.makedirs(opt.outlogs, exist_ok=True)
 
             opt.secret_dir = os.path.join(opt.experiment_dir, "pro_secret")
-            print("Generating processed secret images at: {}".format(opt.secret_dir))
+            print("[*]Generating processed secret images at: {}".format(opt.secret_dir))
             os.makedirs(opt.secret_dir, exist_ok=True)
             
             opt.cover_dir = os.path.join(opt.experiment_dir, "cover")
-            print("Generating cover images at: {}".format(opt.cover_dir))
+            print("[*]Generating cover images at: {}".format(opt.cover_dir))
             os.makedirs(opt.cover_dir, exist_ok=True)
             
             opt.container_dir = os.path.join(opt.experiment_dir, 'container')
-            print("Generating container images at: {}".format(opt.container_dir))
+            print("[*]Generating container images at: {}".format(opt.container_dir))
             os.makedirs(opt.container_dir, exist_ok=True)
         
         elif opt.mode == 'extract':
-            assert os.path.exists(opt.secret_path), "Cannot load secret image"
+            assert os.path.exists(opt.secret_path), "[!]Please input the path of original secret image"
 
             opt.experiment_dir = opt.output_dir
             opt.outlogs = os.path.join(opt.experiment_dir, "ExtractingLogs")
             os.makedirs(opt.outlogs, exist_ok=True)
 
             opt.rev_secret_dir = os.path.join(opt.experiment_dir, "rev_secret")
-            print("Generating retrieved secret images at: {}".format(opt.rev_secret_dir))
+            print("[*]Generating retrieved secret images at: {}".format(opt.rev_secret_dir))
             os.makedirs(opt.rev_secret_dir, exist_ok=True)
 
     logPath = opt.outlogs + '/{:}_log.txt'.format(opt.dataset)
@@ -166,19 +167,17 @@ def main():
     print_log(str(opt), logPath)
 
     ################## Datasets ##################
-    transforms_gray = transforms.Compose([ 
-                transforms.Grayscale(num_output_channels=1),
-                transforms.Resize([opt.imageSize, opt.imageSize]), 
-                transforms.ToTensor()
-            ])
-    transforms_color = transforms.Compose([ 
-                transforms.Resize([opt.imageSize, opt.imageSize]), 
-                transforms.ToTensor()
-            ])
     if opt.channel_cover == 1:  
-        transforms_cover = transforms_gray
+        transforms_cover = transforms.Compose([
+            transforms.Grayscale(num_output_channels=1),
+            transforms.Resize([opt.imageSize, opt.imageSize]), 
+            transforms.ToTensor()
+        ])
     else:
-         transforms_cover = transforms_color
+         transforms_cover = transforms.Compose([
+             transforms.Resize([opt.imageSize, opt.imageSize]), 
+             transforms.ToTensor()
+        ])
 
     if opt.mode == 'train':
         train_dataset_cover = TrainDataset(
@@ -201,23 +200,25 @@ def main():
 
         secret_img = random_bits.unsqueeze(dim=0)
 
-        cover_dataset = ImageDataset(root=opt.origin_dir)
+        cover_dataset = InferDataset(root=opt.origin_dir)
     elif opt.mode == 'extract':
-        print("Load secret image at: {}".format(opt.secret_path))
+        print("[*]Load secret image at: {}".format(opt.secret_path))
         secret_img = Image.open(opt.secret_path).convert('RGB')
         secret_transform = transforms.Compose([
             transforms.ToTensor()
         ])
         secret_img = secret_transform(secret_img).to(opt.device)
-        container_dataset = ImageDataset(root=opt.container_dir)
+        container_dataset = InferDataset(root=opt.container_dir)
      
     ################## Hiding and Reveal Networks ##################
     if opt.norm == 'instance':
         norm_layer = nn.InstanceNorm2d
-    if opt.norm == 'batch':
+    elif opt.norm == 'batch':
         norm_layer = nn.BatchNorm2d
-    if opt.norm == 'none':
+    elif opt.norm == 'none':
         norm_layer = None
+    else:
+        raise ValueError("Invalid norm option. Must be one of [instance, batch, none]")
     
     Hnet = UnetGenerator(input_nc=opt.channel_secret, output_nc=opt.channel_cover, norm_layer=norm_layer, output_function=nn.Sigmoid())
     Rnet = RevealNet(input_nc=opt.channel_cover, output_nc=opt.channel_secret, norm_layer=norm_layer, output_function=nn.Sigmoid())
@@ -239,8 +240,10 @@ def main():
     # Loss and Metric
     if opt.loss == 'l1':
         criterion = nn.L1Loss().cuda()
-    if opt.loss == 'l2':
+    elif opt.loss == 'l2':
         criterion = nn.MSELoss().cuda()
+    else:
+        raise ValueError("Invalid Loss Function. Must be one of [l1, l2]")
 
     # Train the networks when opt.test is empty
     if opt.mode == 'train':
@@ -282,7 +285,7 @@ def main():
             val_hloss, val_rloss, val_hdiff, val_rdiff = validation(val_loader, epoch, Hnet=Hnet, Rnet=Rnet, criterion=criterion)
 
             ################## adjust learning rate ##################
-            scheduler.step(val_rloss)
+            scheduler.step(val_rloss) # 注意！这里只用 R 网络的 loss 进行 learning rate 的更新
 
             # Save the best model parameters
             sum_diff = val_hdiff + val_rdiff
@@ -371,6 +374,7 @@ def train(train_loader, epoch, Hnet, Rnet, criterion):
 
         Hlosses.update(errH.data, opt.bs_train)  # H loss
         Rlosses.update(errR.data, opt.bs_train)  # R loss
+        SumLosses.update(errH.data + errR.data, opt.bs_train) # H loss + R loss
         Hdiff.update(diffH.data, opt.bs_train)
         Rdiff.update(diffR.data, opt.bs_train)
 
@@ -385,9 +389,10 @@ def train(train_loader, epoch, Hnet, Rnet, criterion):
         batch_time.update(time.time() - start_time)
         start_time = time.time()
 
-        log = '[{:d}/{:d}][{:d}/{:d}]\tLoss_H: {:.6f} Loss_R: {:.6f} L1_H: {:.4f} L1_R: {:.4f} \tdatatime: {:.4f} \tbatchtime: {:.4f}'.format(
-            epoch, opt.max_epoch, i, opt.iters_per_epoch,
-            Hlosses.val, Rlosses.val, Hdiff.val, Rdiff.val, data_time.val, batch_time.val
+        log = '[{:d}/{:d}][{:d}/{:d}]\tLoss_H: {:.6f} Loss_R: {:.6f} Loss_Sum: {:.6f} L1_H: {:.4f} L1_R: {:.4f}\t datatime: {:.4f} \tbatchtime: {:.4f}'.format(
+            epoch, opt.max_epoch, i, opt.max_train_iters,
+            Hlosses.val, Rlosses.val, SumLosses.val, Hdiff.val, Rdiff.val, 
+            data_time.val, batch_time.val
         )
 
         if i % opt.logFrequency == 0:
@@ -396,14 +401,14 @@ def train(train_loader, epoch, Hnet, Rnet, criterion):
         if epoch <= 0 and i % opt.resultPicFrequency == 0:
             save_result_pic(opt.dis_num, cover_imgv, container_img.data, secret_imgv_nh, rev_secret_img.data, epoch, i, opt.trainpics)
             
-        if i == opt.iters_per_epoch-1:
+        if i == opt.max_train_iters-1:
             break
 
     # To save the last batch only
     save_result_pic(opt.dis_num, cover_imgv, container_img.data, secret_imgv_nh, rev_secret_img.data, epoch, i, opt.trainpics)
 
-    epoch_log = "Training[{:d}] Hloss={:.6f}\tRloss={:.6f}\tHdiff={:.4f}\tRdiff={:.4f}\tlr={:.6f}\t Epoch time={:.4f}".format(
-        epoch, Hlosses.avg, Rlosses.avg, Hdiff.avg, Rdiff.avg, optimizer.param_groups[0]['lr'], batch_time.sum
+    epoch_log = "Training[{:d}] Hloss={:.6f}\tRloss={:.6f}\tSumLoss={:.6f}\tHdiff={:.4f}\tRdiff={:.4f}\tlr={:.6f}\t Epoch time={:.4f}".format(
+        epoch, Hlosses.avg, Rlosses.avg, SumLosses.avg, Hdiff.avg, Rdiff.avg, optimizer.param_groups[0]['lr'], batch_time.sum
     )
     print_log(epoch_log, logPath)
 
@@ -412,24 +417,23 @@ def train(train_loader, epoch, Hnet, Rnet, criterion):
         writer.add_scalar("lr/beta", opt.beta, epoch)
         writer.add_scalar('train/H_loss', Hlosses.avg, epoch)
         writer.add_scalar('train/R_loss', Rlosses.avg, epoch)
-        writer.add_scalar('train/sum_loss', SumLosses.avg, epoch)
+        writer.add_scalar('train/Sum_loss', SumLosses.avg, epoch)
         writer.add_scalar('train/H_diff', Hdiff.avg, epoch)
         writer.add_scalar('train/R_diff', Rdiff.avg, epoch)
 
 
 def validation(val_loader, epoch, Hnet, Rnet, criterion):
-    print("#################################################### validation begin ####################################################")
-    
-    start_time = time.time()
-
-    Hnet.eval()
-    Rnet.eval()
-    
+    print("#################################################### validation begin ####################################################")    
     batch_time = AverageMeter()
     Hlosses = AverageMeter()
     Rlosses = AverageMeter()  
     Hdiff = AverageMeter()
     Rdiff = AverageMeter()
+        
+    start_time = time.time()
+
+    Hnet.eval()
+    Rnet.eval()
 
     for i, (secret_img, cover_img) in enumerate(val_loader):
 
@@ -440,22 +444,23 @@ def validation(val_loader, epoch, Hnet, Rnet, criterion):
         Hdiff.update(diffH.data, opt.bs_train)
         Rdiff.update(diffR.data, opt.bs_train)
         
-        i_total = 200
-        if i == i_total-1:
+        if i == opt.max_val_iters-1:
             break
 
         batch_time.update(time.time() - start_time)
         start_time = time.time()
 
-        val_log = "Validation[{:d}] val_Hloss = {:.6f}\t val_Rloss = {:.6f}\t val_Hdiff = {:.6f}\t val_Rdiff={:.4f}\t batch time={:.2f}".format(
-            epoch, Hlosses.val, Rlosses.val, Hdiff.val, Rdiff.val, batch_time.val
+        val_log = "Validation[{:d}][{:d}/{:d}]\t val_Hloss = {:.6f} val_Rloss = {:.6f} val_Hdiff = {:.4f} val_Rdiff={:.4f}\t batch time={:.4f}".format(
+            epoch, i, opt.max_val_iters,
+            Hlosses.val, Rlosses.val, Hdiff.val, Rdiff.val, 
+            batch_time.val
         )
         if i % opt.logFrequency == 0:
             print(val_log)
     
     save_result_pic(opt.dis_num, cover_imgv, container_img.data, secret_imgv_nh, rev_secret_img.data, epoch, i, opt.validationpics)
     
-    val_log = "Validation[{:d}] val_Hloss = {:.6f}\t val_Rloss = {:.6f}\t val_Hdiff = {:.6f}\t val_Rdiff={:.4f}\t batch time={:.2f}".format(
+    val_log = "Validation[{:d}] val_Hloss = {:.6f}\t val_Rloss = {:.6f}\t val_Hdiff = {:.4f}\t val_Rdiff={:.4f}\t batch time={:.4f}".format(
         epoch, Hlosses.avg, Rlosses.avg, Hdiff.avg, Rdiff.avg, batch_time.sum)
     print_log(val_log, logPath)
 

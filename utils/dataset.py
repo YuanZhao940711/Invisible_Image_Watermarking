@@ -36,7 +36,7 @@ class TrainDataset(Dataset):
         return self.transforms(image)
 
 
-class ImageDataset(Dataset):
+class InferDataset(Dataset):
     def __init__(self, root):
         self.image_paths = sorted(make_dataset(root))
         self.transforms = transforms.Compose([
