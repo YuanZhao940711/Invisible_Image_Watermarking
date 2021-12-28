@@ -167,6 +167,18 @@ def main():
     print_log(str(opt), logPath)
 
     ################## Datasets ##################
+    if opt.channel_secret == 1:  
+        transforms_secret = transforms.Compose([
+            transforms.Grayscale(num_output_channels=1),
+            transforms.Resize([opt.imageSize, opt.imageSize]), 
+            transforms.ToTensor()
+        ])
+    else:
+         transforms_secret = transforms.Compose([
+             transforms.Resize([opt.imageSize, opt.imageSize]), 
+             transforms.ToTensor()
+        ])
+        
     if opt.channel_cover == 1:  
         transforms_cover = transforms.Compose([
             transforms.Grayscale(num_output_channels=1),
@@ -177,14 +189,14 @@ def main():
          transforms_cover = transforms.Compose([
              transforms.Resize([opt.imageSize, opt.imageSize]), 
              transforms.ToTensor()
-        ])
+        ])        
 
     if opt.mode == 'train':
-        train_dataset_cover = TrainDataset(
-            opt.train_dir,
-            transforms_cover)
         secret_dataset = TrainDataset(
             opt.secret_dir,
+            transforms_secret)
+        train_dataset_cover = TrainDataset(
+            opt.train_dir,
             transforms_cover)
         val_dataset_cover = TrainDataset(
             opt.val_dir,
@@ -192,9 +204,12 @@ def main():
     elif opt.mode == 'generate':
         # Secret Image
         random_bits = np.ones((opt.imageSize, opt.imageSize))
-        random_bits = np.stack(arrays=(random_bits, random_bits, random_bits), axis=0)
-        random_bits = torch.from_numpy(random_bits).float().to(opt.device)
-        
+        if opt.channel_secret == 1:
+            random_bits = torch.from_numpy(random_bits).float().to(opt.device)
+        else:
+            random_bits = np.stack(arrays=(random_bits, random_bits, random_bits), axis=0)
+            random_bits = torch.from_numpy(random_bits).float().to(opt.device)
+            
         random_bits_img = tensor2img(random_bits.clone())
         random_bits_img.save(os.path.join(opt.experiment_dir, 'secret_img_ori.png'))
 
@@ -389,7 +404,7 @@ def train(train_loader, epoch, Hnet, Rnet, criterion):
         batch_time.update(time.time() - start_time)
         start_time = time.time()
 
-        log = '[{:d}/{:d}][{:d}/{:d}]\tLoss_H: {:.6f} Loss_R: {:.6f} Loss_Sum: {:.6f} L1_H: {:.4f} L1_R: {:.4f}\t datatime: {:.4f} \tbatchtime: {:.4f}'.format(
+        log = '[{:d}/{:d}][{:d}/{:d}] Loss_H: {:.6f} Loss_R: {:.6f} Loss_Sum: {:.6f} L1_H: {:.4f} L1_R: {:.4f} datatime: {:.4f} batchtime: {:.4f}'.format(
             epoch, opt.max_epoch, i, opt.max_train_iters,
             Hlosses.val, Rlosses.val, SumLosses.val, Hdiff.val, Rdiff.val, 
             data_time.val, batch_time.val
@@ -407,7 +422,7 @@ def train(train_loader, epoch, Hnet, Rnet, criterion):
     # To save the last batch only
     save_result_pic(opt.dis_num, cover_imgv, container_img.data, secret_imgv_nh, rev_secret_img.data, epoch, i, opt.trainpics)
 
-    epoch_log = "Training[{:d}] Hloss={:.6f}\tRloss={:.6f}\tSumLoss={:.6f}\tHdiff={:.4f}\tRdiff={:.4f}\tlr={:.6f}\t Epoch time={:.4f}".format(
+    epoch_log = "Training[{:d}] Hloss={:.6f} Rloss={:.6f} SumLoss={:.6f} Hdiff={:.4f} Rdiff={:.4f} lr={:.6f} Epoch time={:.4f}".format(
         epoch, Hlosses.avg, Rlosses.avg, SumLosses.avg, Hdiff.avg, Rdiff.avg, optimizer.param_groups[0]['lr'], batch_time.sum
     )
     print_log(epoch_log, logPath)
@@ -450,7 +465,7 @@ def validation(val_loader, epoch, Hnet, Rnet, criterion):
         batch_time.update(time.time() - start_time)
         start_time = time.time()
 
-        val_log = "Validation[{:d}][{:d}/{:d}]\t val_Hloss = {:.6f} val_Rloss = {:.6f} val_Hdiff = {:.4f} val_Rdiff={:.4f}\t batch time={:.4f}".format(
+        val_log = "Validation[{:d}][{:d}/{:d}] val_Hloss = {:.6f} val_Rloss = {:.6f} val_Hdiff = {:.4f} val_Rdiff={:.4f} batch time={:.4f}".format(
             epoch, i, opt.max_val_iters,
             Hlosses.val, Rlosses.val, Hdiff.val, Rdiff.val, 
             batch_time.val
@@ -460,7 +475,7 @@ def validation(val_loader, epoch, Hnet, Rnet, criterion):
     
     save_result_pic(opt.dis_num, cover_imgv, container_img.data, secret_imgv_nh, rev_secret_img.data, epoch, i, opt.validationpics)
     
-    val_log = "Validation[{:d}] val_Hloss = {:.6f}\t val_Rloss = {:.6f}\t val_Hdiff = {:.4f}\t val_Rdiff={:.4f}\t batch time={:.4f}".format(
+    val_log = "Validation[{:d}] val_Hloss = {:.6f} val_Rloss = {:.6f} val_Hdiff = {:.4f} val_Rdiff={:.4f} batch time={:.4f}".format(
         epoch, Hlosses.avg, Rlosses.avg, Hdiff.avg, Rdiff.avg, batch_time.sum)
     print_log(val_log, logPath)
 
@@ -559,8 +574,10 @@ def tensor2img(var):
     var[var < 0] = 0
     var[var > 1] = 1
     var = var * 255
+    if var.shape[2] == 1:
+        var = np.squeeze(var, axis=2)
     return Image.fromarray(var.astype('uint8'))
-
+    
 
 def save_result_pic(dis_num, cover, container, secret, rev_secret, epoch, i, save_path):
     if opt.debug:
