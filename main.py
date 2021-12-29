@@ -204,16 +204,13 @@ def main():
     if opt.mode == 'train':
         secret_dataset = ImageDataset(
             root = opt.secret_dir,
-            transforms = transforms_secret,
-            channel = opt.channel_secret)
+            transforms = transforms_secret)
         train_dataset_cover = ImageDataset(
             root = opt.train_dir,
-            transforms = transforms_cover,
-            channel = opt.channel_cover)
+            transforms = transforms_cover)
         val_dataset_cover = ImageDataset(
             root = opt.val_dir,
-            transforms = transforms_cover,
-            channel = opt.channel_cover)
+            transforms = transforms_cover)
 
         Hnet = UnetGenerator(input_nc=opt.channel_secret, output_nc=opt.channel_cover, norm_layer=norm_layer, output_function=nn.Sigmoid())
         Rnet = RevealNet(input_nc=opt.channel_cover, output_nc=opt.channel_secret, norm_layer=norm_layer, output_function=nn.Sigmoid())
@@ -227,6 +224,14 @@ def main():
             checkpoint = torch.load(opt.checkpoint)
             Hnet.load_state_dict(checkpoint['H_state_dict'], strict=True)
             Rnet.load_state_dict(checkpoint['R_state_dict'], strict=True)
+
+        # Loss and Metric
+        if opt.loss == 'l1':
+            criterion = nn.L1Loss().cuda()
+        elif opt.loss == 'l2':
+            criterion = nn.MSELoss().cuda()
+        else:
+            raise ValueError("Invalid Loss Function. Must be one of [l1, l2]")
 
     elif opt.mode == 'generate':
         # Secret Image
@@ -242,7 +247,7 @@ def main():
 
         secret_img = random_bits.unsqueeze(dim=0)
 
-        cover_dataset = ImageDataset(root=opt.origin_dir, transforms=transforms_cover, channel=opt.channel_cover)
+        cover_dataset = ImageDataset(root=opt.origin_dir, transforms=transforms_cover)
 
         Hnet = UnetGenerator(input_nc=opt.channel_secret, output_nc=opt.channel_cover, norm_layer=norm_layer, output_function=nn.Sigmoid())
         Hnet.to(opt.device)
@@ -270,7 +275,7 @@ def main():
             transforms.ToTensor()
         ])
         secret_img = secret_transform(secret_img).to(opt.device)
-        container_dataset = ImageDataset(root=opt.container_dir, transforms=transforms_container, channel=opt.channel_container)
+        container_dataset = ImageDataset(root=opt.container_dir, transforms=transforms_container)
 
         Rnet = RevealNet(input_nc=opt.channel_container, output_nc=opt.channel_secret, norm_layer=norm_layer, output_function=nn.Sigmoid())
         Rnet.to(opt.device)
@@ -284,15 +289,6 @@ def main():
     #print_network(Hnet)
     #print_network(Rnet)
 
-    # Loss and Metric
-    if opt.loss == 'l1':
-        criterion = nn.L1Loss().cuda()
-    elif opt.loss == 'l2':
-        criterion = nn.MSELoss().cuda()
-    else:
-        raise ValueError("Invalid Loss Function. Must be one of [l1, l2]")
-
-    # Train the networks when opt.test is empty
     if opt.mode == 'train':
         params = list(Hnet.parameters())+list(Rnet.parameters())
         optimizer = optim.Adam(params, lr=opt.lr, betas=(opt.beta_adam, 0.999))

@@ -25,20 +25,12 @@ def make_dataset(dir):
 
 
 class ImageDataset(Dataset):
-    def __init__(self, root, transforms, channel):
+    def __init__(self, root, transforms):
         self.image_paths = sorted(make_dataset(root))
         self.transforms = transforms
-        self.image_channel = channel
     def __len__(self):
         return len(self.image_paths)
     def __getitem__(self, index):
         image_path = self.image_paths[index]
         image = Image.open(image_path)
-        if self.image_channel == 1:
-            image = image.convert('L')
-        elif self.image_channel == 3:
-            image = image.convert('RGB')
-        else:
-            raise ValueError("[!]Expect incorrect image format. The channel of image should 1 or 3!")
         return self.transforms(image)
-
