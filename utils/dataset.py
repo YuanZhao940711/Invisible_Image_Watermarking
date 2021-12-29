@@ -6,6 +6,7 @@ import torch
 from torch.utils.data import Dataset
 from torchvision.transforms import transforms
 
+
 IMG_EXTENSIONS = [
     '.jpg', '.JPG', '.jpeg', '.JPEG', '.png', '.PNG', '.ppm', '.PPM', '.bmp', '.BMP', '.tiff'
 ]
@@ -23,31 +24,21 @@ def make_dataset(dir):
     return image_paths
 
 
-class TrainDataset(Dataset):
-    def __init__(self, root, transforms):
+class ImageDataset(Dataset):
+    def __init__(self, root, transforms, channel):
         self.image_paths = sorted(make_dataset(root))
         self.transforms = transforms
+        self.image_channel = channel
     def __len__(self):
         return len(self.image_paths)
     def __getitem__(self, index):
         image_path = self.image_paths[index]
         image = Image.open(image_path)
-        image = image.convert('RGB')
+        if self.image_channel == 1:
+            image = image.convert('L')
+        elif self.image_channel == 3:
+            image = image.convert('RGB')
+        else:
+            raise ValueError("[!]Expect incorrect image format. The channel of image should 1 or 3!")
         return self.transforms(image)
 
-
-class InferDataset(Dataset):
-    def __init__(self, root):
-        self.image_paths = sorted(make_dataset(root))
-        self.transforms = transforms.Compose([
-            transforms.Resize((256,256)),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-        ])
-    def __len__(self):
-        return len(self.image_paths)
-    def __getitem__(self, index):
-        image_path = self.image_paths[index]
-        image = Image.open(image_path)
-        image = image.convert('RGB')
-        return self.transforms(image)

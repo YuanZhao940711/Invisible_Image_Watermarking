@@ -32,7 +32,7 @@ import matplotlib.pyplot as plt
 
 from PIL import Image
 from tqdm import tqdm
-from utils.dataset import TrainDataset, InferDataset
+from utils.dataset import ImageDataset
 ###
 
 
@@ -55,6 +55,7 @@ parser.add_argument('--norm', default='instance', help='batch or instance')
 parser.add_argument('--loss', default='l2', help='l1 or l2')
 parser.add_argument('--channel_cover', type=int, default=3, help='1: gray; 3: color')
 parser.add_argument('--channel_secret', type=int, default=3, help='1: gray; 3: color')
+parser.add_argument('--channel_container', type=int, default=3, help='1: gray; 3: color')
 parser.add_argument('--max_val_iters', type=int, default=200)
 parser.add_argument('--max_train_iters', type=int, default=2000)
 
@@ -166,7 +167,16 @@ def main():
 
     print_log(str(opt), logPath)
 
-    ################## Datasets ##################
+    ################## Datasets and Networks ##################
+    if opt.norm == 'instance':
+        norm_layer = nn.InstanceNorm2d
+    elif opt.norm == 'batch':
+        norm_layer = nn.BatchNorm2d
+    elif opt.norm == 'none':
+        norm_layer = None
+    else:
+        raise ValueError("Invalid norm option. Must be one of [instance, batch, none]")
+
     if opt.channel_secret == 1:  
         transforms_secret = transforms.Compose([
             transforms.Grayscale(num_output_channels=1),
@@ -192,15 +202,32 @@ def main():
         ])        
 
     if opt.mode == 'train':
-        secret_dataset = TrainDataset(
-            opt.secret_dir,
-            transforms_secret)
-        train_dataset_cover = TrainDataset(
-            opt.train_dir,
-            transforms_cover)
-        val_dataset_cover = TrainDataset(
-            opt.val_dir,
-            transforms_cover)
+        secret_dataset = ImageDataset(
+            root = opt.secret_dir,
+            transforms = transforms_secret,
+            channel = opt.channel_secret)
+        train_dataset_cover = ImageDataset(
+            root = opt.train_dir,
+            transforms = transforms_cover,
+            channel = opt.channel_cover)
+        val_dataset_cover = ImageDataset(
+            root = opt.val_dir,
+            transforms = transforms_cover,
+            channel = opt.channel_cover)
+
+        Hnet = UnetGenerator(input_nc=opt.channel_secret, output_nc=opt.channel_cover, norm_layer=norm_layer, output_function=nn.Sigmoid())
+        Rnet = RevealNet(input_nc=opt.channel_cover, output_nc=opt.channel_secret, norm_layer=norm_layer, output_function=nn.Sigmoid())
+
+        # Using Kaiming Normalization to initialize network's parameters
+        Hnet.apply(weights_init).to(opt.device)
+        Rnet.apply(weights_init).to(opt.device)
+
+        # Load Pre-trained mode
+        if opt.checkpoint != "":
+            checkpoint = torch.load(opt.checkpoint)
+            Hnet.load_state_dict(checkpoint['H_state_dict'], strict=True)
+            Rnet.load_state_dict(checkpoint['R_state_dict'], strict=True)
+
     elif opt.mode == 'generate':
         # Secret Image
         random_bits = np.ones((opt.imageSize, opt.imageSize))
@@ -215,42 +242,47 @@ def main():
 
         secret_img = random_bits.unsqueeze(dim=0)
 
-        cover_dataset = InferDataset(root=opt.origin_dir)
+        cover_dataset = ImageDataset(root=opt.origin_dir, transforms=transforms_cover, channel=opt.channel_cover)
+
+        Hnet = UnetGenerator(input_nc=opt.channel_secret, output_nc=opt.channel_cover, norm_layer=norm_layer, output_function=nn.Sigmoid())
+        Hnet.to(opt.device)
+
+        # Load Pre-trained mode        
+        if opt.checkpoint != "":
+            checkpoint = torch.load(opt.checkpoint)
+            Hnet.load_state_dict(checkpoint['H_state_dict'], strict=True)
+                    
     elif opt.mode == 'extract':
+        if opt.channel_container == 1:  
+            transforms_container = transforms.Compose([
+                transforms.Grayscale(num_output_channels=1),
+                transforms.Resize([opt.imageSize, opt.imageSize]), 
+                transforms.ToTensor()
+            ])
+        else:
+            transforms_container = transforms.Compose([
+                transforms.Resize([opt.imageSize, opt.imageSize]), 
+                transforms.ToTensor()
+            ])               
         print("[*]Load secret image at: {}".format(opt.secret_path))
         secret_img = Image.open(opt.secret_path).convert('RGB')
         secret_transform = transforms.Compose([
             transforms.ToTensor()
         ])
         secret_img = secret_transform(secret_img).to(opt.device)
-        container_dataset = InferDataset(root=opt.container_dir)
-     
-    ################## Hiding and Reveal Networks ##################
-    if opt.norm == 'instance':
-        norm_layer = nn.InstanceNorm2d
-    elif opt.norm == 'batch':
-        norm_layer = nn.BatchNorm2d
-    elif opt.norm == 'none':
-        norm_layer = None
-    else:
-        raise ValueError("Invalid norm option. Must be one of [instance, batch, none]")
-    
-    Hnet = UnetGenerator(input_nc=opt.channel_secret, output_nc=opt.channel_cover, norm_layer=norm_layer, output_function=nn.Sigmoid())
-    Rnet = RevealNet(input_nc=opt.channel_cover, output_nc=opt.channel_secret, norm_layer=norm_layer, output_function=nn.Sigmoid())
+        container_dataset = ImageDataset(root=opt.container_dir, transforms=transforms_container, channel=opt.channel_container)
 
-    ################## Kaiming Normalization ##################
-    Hnet.apply(weights_init).to(opt.device)
-    Rnet.apply(weights_init).to(opt.device)
+        Rnet = RevealNet(input_nc=opt.channel_container, output_nc=opt.channel_secret, norm_layer=norm_layer, output_function=nn.Sigmoid())
+        Rnet.to(opt.device)
 
-    ################## Load Pre-trained mode ##################
-    if opt.checkpoint != "":
-        checkpoint = torch.load(opt.checkpoint)
-        Hnet.load_state_dict(checkpoint['H_state_dict'], strict=True)
-        Rnet.load_state_dict(checkpoint['R_state_dict'], strict=True)
+        # Load Pre-trained mode
+        if opt.checkpoint != "":
+            checkpoint = torch.load(opt.checkpoint)
+            Rnet.load_state_dict(checkpoint['R_state_dict'], strict=True)
 
     # Print networks
-    print_network(Hnet)
-    print_network(Rnet)
+    #print_network(Hnet)
+    #print_network(Rnet)
 
     # Loss and Metric
     if opt.loss == 'l1':
