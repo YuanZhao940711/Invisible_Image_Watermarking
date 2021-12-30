@@ -238,6 +238,7 @@ def main():
         random_bits = np.ones((opt.imageSize, opt.imageSize))
         if opt.channel_secret == 1:
             random_bits = torch.from_numpy(random_bits).float().to(opt.device)
+            random_bits = random_bits.unsqueeze(dim=0)
         else:
             random_bits = np.stack(arrays=(random_bits, random_bits, random_bits), axis=0)
             random_bits = torch.from_numpy(random_bits).float().to(opt.device)
@@ -252,13 +253,13 @@ def main():
         Hnet = UnetGenerator(input_nc=opt.channel_secret, output_nc=opt.channel_cover, norm_layer=norm_layer, output_function=nn.Sigmoid())
         Hnet.to(opt.device)
 
-        # Load Pre-trained mode        
+        # Load Pre-trained mode
         if opt.checkpoint != "":
             checkpoint = torch.load(opt.checkpoint)
             Hnet.load_state_dict(checkpoint['H_state_dict'], strict=True)
                     
     elif opt.mode == 'extract':
-        if opt.channel_container == 1:  
+        if opt.channel_container == 1:
             transforms_container = transforms.Compose([
                 transforms.Grayscale(num_output_channels=1),
                 transforms.Resize([opt.imageSize, opt.imageSize]), 
@@ -268,13 +269,19 @@ def main():
             transforms_container = transforms.Compose([
                 transforms.Resize([opt.imageSize, opt.imageSize]), 
                 transforms.ToTensor()
-            ])               
+            ])
+        
         print("[*]Load secret image at: {}".format(opt.secret_path))
-        secret_img = Image.open(opt.secret_path).convert('RGB')
+        secret_img = Image.open(opt.secret_path)
+        if len(secret_img.getbands()) == 1:
+            secret_img = secret_img.convert('L')
+        else:
+            secret_img = secret_img.convert('RGB')
         secret_transform = transforms.Compose([
             transforms.ToTensor()
         ])
         secret_img = secret_transform(secret_img).to(opt.device)
+
         container_dataset = ImageDataset(root=opt.container_dir, transforms=transforms_container)
 
         Rnet = RevealNet(input_nc=opt.channel_container, output_nc=opt.channel_secret, norm_layer=norm_layer, output_function=nn.Sigmoid())
