@@ -3,7 +3,6 @@
 import argparse
 import os
 import shutil
-import socket
 import time
 
 import torch
@@ -15,7 +14,6 @@ import torch.nn.parallel
 import torch.optim as optim
 import torch.utils.data
 from torch.utils.tensorboard import SummaryWriter
-from torch.autograd import Variable
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 
