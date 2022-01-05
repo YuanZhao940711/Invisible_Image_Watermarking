@@ -22,8 +22,6 @@ from models.HidingUNet import UnetGenerator
 from models.RevealNet import RevealNet
 
 import numpy as np
-from skimage.metrics import structural_similarity as SSIM
-from skimage.metrics import peak_signal_noise_ratio as PSNR
 
 ###
 import matplotlib.pyplot as plt
@@ -51,9 +49,10 @@ parser.add_argument('--logFrequency', type=int, default=10, help='the frequency 
 parser.add_argument('--resultPicFrequency', type=int, default=100, help='the frequency of save the resultPic')
 parser.add_argument('--norm', default='instance', help='batch or instance')
 parser.add_argument('--loss', default='l2', help='l1 or l2')
-parser.add_argument('--channel_cover', type=int, default=3, help='1: gray; 3: color')
-parser.add_argument('--channel_secret', type=int, default=3, help='1: gray; 3: color')
-parser.add_argument('--channel_container', type=int, default=3, help='1: gray; 3: color')
+parser.add_argument('--Hnet_inchannel', type=int, default=3, help='1: gray; 3: color')
+parser.add_argument('--Hnet_outchannel', type=int, default=3, help='1: gray; 3: color')
+parser.add_argument('--Rnet_inchannel', type=int, default=3, help='1: gray; 3: color')
+parser.add_argument('--Rnet_outchannel', type=int, default=3, help='1: gray; 3: color')
 parser.add_argument('--max_val_iters', type=int, default=200)
 parser.add_argument('--max_train_iters', type=int, default=2000)
 
@@ -105,11 +104,11 @@ def main():
     ##################  Create the dirs to save the result ##################
     if not opt.debug:
         cur_time = time.strftime('%Y-%m-%d_H%H-%M-%S', time.localtime())
+        assert opt.Hnet_inchannel == opt.Rnet_outchannel, 'Please make sure the channel of input secret image equal to the extracted secret image!'
         if opt.mode == 'train':
-            secret_comment = 'color' if opt.channel_secret == 3 else 'gray'
-            cover_comment = 'color' if opt.channel_cover == 3 else 'gray'
-            comment = secret_comment+'_In_'+cover_comment
-            opt.experiment_dir = os.path.join(opt.output_dir, cur_time+"_"+str(opt.imageSize)+"_"+opt.norm+"_"+opt.loss+"_"+str(opt.beta)+"_"+comment)
+            Hnet_comment = 'Hnet_in{}out{}'.format(opt.Hnet_inchannel, opt.Hnet_outchannel)
+            Rnet_comment = 'Rnet_in{}out{}'.format(opt.Rnet_inchannel, opt.Rnet_outchannel)
+            opt.experiment_dir = os.path.join(opt.output_dir, cur_time+"_"+str(opt.imageSize)+"_"+opt.norm+"_"+opt.loss+"_"+str(opt.beta)+"_"+Hnet_comment+"_"+Rnet_comment)
             print("[*]Saving the experiment results at {}".format(opt.experiment_dir))
 
             opt.outckpts = os.path.join(opt.experiment_dir, "CheckPoints")
@@ -175,7 +174,7 @@ def main():
     else:
         raise ValueError("Invalid norm option. Must be one of [instance, batch, none]")
 
-    if opt.channel_secret == 1:  
+    if opt.Hnet_inchannel == 1:  
         transforms_secret = transforms.Compose([
             transforms.Grayscale(num_output_channels=1),
             transforms.Resize([opt.imageSize, opt.imageSize]), 
@@ -187,7 +186,7 @@ def main():
              transforms.ToTensor()
         ])
         
-    if opt.channel_cover == 1:  
+    if opt.Rnet_inchannel == 1:  
         transforms_cover = transforms.Compose([
             transforms.Grayscale(num_output_channels=1),
             transforms.Resize([opt.imageSize, opt.imageSize]), 
@@ -210,8 +209,8 @@ def main():
             root = opt.val_dir,
             transforms = transforms_cover)
 
-        Hnet = UnetGenerator(input_nc=opt.channel_secret, output_nc=opt.channel_cover, norm_layer=norm_layer, output_function=nn.Sigmoid())
-        Rnet = RevealNet(input_nc=opt.channel_cover, output_nc=opt.channel_secret, norm_layer=norm_layer, output_function=nn.Sigmoid())
+        Hnet = UnetGenerator(input_nc=opt.Hnet_inchannel, output_nc=opt.Hnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid())
+        Rnet = RevealNet(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid())
 
         # Using Kaiming Normalization to initialize network's parameters
         Hnet.apply(weights_init).to(opt.device)
@@ -234,7 +233,7 @@ def main():
     elif opt.mode == 'generate':
         # Secret Image
         random_bits = np.ones((opt.imageSize, opt.imageSize))
-        if opt.channel_secret == 1:
+        if opt.Hnet_inchannel == 1:
             random_bits = torch.from_numpy(random_bits).float().to(opt.device)
             random_bits = random_bits.unsqueeze(dim=0)
         else:
@@ -248,7 +247,7 @@ def main():
 
         cover_dataset = ImageDataset(root=opt.origin_dir, transforms=transforms_cover)
 
-        Hnet = UnetGenerator(input_nc=opt.channel_secret, output_nc=opt.channel_cover, norm_layer=norm_layer, output_function=nn.Sigmoid())
+        Hnet = UnetGenerator(input_nc=opt.Hnet_inchannel, output_nc=opt.Hnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid())
         Hnet.to(opt.device)
 
         # Load Pre-trained mode
@@ -257,7 +256,7 @@ def main():
             Hnet.load_state_dict(checkpoint['H_state_dict'], strict=True)
                     
     elif opt.mode == 'extract':
-        if opt.channel_container == 1:
+        if opt.Rnet_inchannel == 1:
             transforms_container = transforms.Compose([
                 transforms.Grayscale(num_output_channels=1),
                 transforms.Resize([opt.imageSize, opt.imageSize]), 
@@ -282,7 +281,7 @@ def main():
 
         container_dataset = ImageDataset(root=opt.container_dir, transforms=transforms_container)
 
-        Rnet = RevealNet(input_nc=opt.channel_container, output_nc=opt.channel_secret, norm_layer=norm_layer, output_function=nn.Sigmoid())
+        Rnet = RevealNet(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid())
         Rnet.to(opt.device)
 
         # Load Pre-trained mode
@@ -561,7 +560,7 @@ def extract(dataset, con_loader, Rnet):
 
         secret_img_batch = secret_img.repeat(batch_size_container, 1, 1, 1)
 
-        rev_secret_batch = Rnet(container_batch) # rev_secret_img; bs x 3 x 128 x 128
+        rev_secret_batch = Rnet(container_batch) # rev_secret_img: bs x 3 x 256 x 256
         
         err = rev_secret_batch - secret_img_batch
         err = err.abs().sum(dim=(1,2,3)) / (3 * opt.imageSize * opt.imageSize)
@@ -604,6 +603,9 @@ def adjust_learning_rate(optimizer, epoch):
 
 def tensor2img(var):
     var = var.cpu().detach().numpy().transpose([1,2,0])
+    #var = var * 255
+    #var[var < 0] = 0
+    #var[var > 255] = 255
     var[var < 0] = 0
     var[var > 1] = 1
     var = var * 255
