@@ -32,5 +32,5 @@ class ImageDataset(Dataset):
         return len(self.image_paths)
     def __getitem__(self, index):
         image_path = self.image_paths[index]
-        image = Image.open(image_path)
+        image = Image.open(image_path).convert("RGB")
         return self.transforms(image)

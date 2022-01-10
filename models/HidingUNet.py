@@ -49,7 +49,6 @@ class UnetGenerator(nn.Module):
             nn.ConvTranspose2d(in_channels=64, out_channels=output_nc, kernel_size=4, stride=2, padding=1),
             output_function
         )
-        self.factor = 1 #10/255 # !
 
     def forward(self, Xt):
         down_feat1 = self.conv1(Xt) # Xt: 3x256x256 -> down_feat1: 32x128x128
@@ -68,5 +67,4 @@ class UnetGenerator(nn.Module):
         up_feat6 = self.deconv5(input=up_feat5, feat=down_feat2) # input(256x32x32->64x64x64) + feat(64x64x64) = up_feat6(128x64x64)
         up_feat7 = self.deconv6(input=up_feat6, feat=down_feat1) # input(128x64x64->32x128x128) + feat(32x128x128) = up_feat7(64x128x128)
 
-        x = self.output_layer(up_feat7) # up_feat7(64x128x128) -> x(3x256x256)
-        return self.factor * x
+        return self.output_layer(up_feat7) # up_feat7(64x128x128) -> x(3x256x256)

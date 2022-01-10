@@ -41,6 +41,7 @@ parser.add_argument('--decay_round', type=int, default=10, help='learning rate d
 parser.add_argument('--beta_adam', type=float, default=0.5, help='beta_adam for adam. default=0.5')
 parser.add_argument('--Hnet', default='', help="path to Hidingnet (to continue training)")
 parser.add_argument('--Rnet', default='', help="path to Revealnet (to continue training)")
+parser.add_argument('--Hnet_factor', type=float, default=1, help='hyper parameter of Hnet factor')
 parser.add_argument('--beta', type=float, default=0.75, help='hyper parameter of beta')
 parser.add_argument('--checkpoint', default='', help='checkpoint address')
 
@@ -96,6 +97,7 @@ def main():
     global opt, optimizer, optimizerR, writer, logPath, scheduler, schedulerR, val_loader, smallestLoss, secret_img
 
     opt = parser.parse_args()
+    opt.Hnet_factor = 1
     opt.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     print("[*]Running on device: {}".format(opt.device))
 
@@ -108,7 +110,7 @@ def main():
         if opt.mode == 'train':
             Hnet_comment = 'Hnet_in{}out{}'.format(opt.Hnet_inchannel, opt.Hnet_outchannel)
             Rnet_comment = 'Rnet_in{}out{}'.format(opt.Rnet_inchannel, opt.Rnet_outchannel)
-            opt.experiment_dir = os.path.join(opt.output_dir, cur_time+"_"+str(opt.imageSize)+"_"+opt.norm+"_"+opt.loss+"_"+str(opt.beta)+"_"+Hnet_comment+"_"+Rnet_comment)
+            opt.experiment_dir = os.path.join(opt.output_dir, cur_time+"_"+str(opt.imageSize)+"_"+opt.norm+"_"+opt.loss+"_"+str(opt.beta)+"_"+Hnet_comment+"_"+Rnet_comment+"_"+str(opt.Hnet_factor))
             print("[*]Saving the experiment results at {}".format(opt.experiment_dir))
 
             opt.outckpts = os.path.join(opt.experiment_dir, "CheckPoints")
@@ -384,7 +386,7 @@ def forward_pass(secret_img, cover_img, Hnet, Rnet, criterion):
     secret_img = secret_img.to(opt.device)
     cover_img = cover_img.to(opt.device)
 
-    itm_secret_img = Hnet(secret_img)
+    itm_secret_img = Hnet(secret_img) * opt.Hnet_factor
     
     container_img = itm_secret_img + cover_img
 
@@ -531,7 +533,7 @@ def generate(dataset, cov_loader, Hnet):
 
         H_input = secret_img.repeat(batch_size_cover, 1, 1, 1)
 
-        pro_secret_batch = Hnet(H_input)
+        pro_secret_batch = Hnet(H_input) * opt.Hnet_factor
 
         container_batch = pro_secret_batch + cover_batch
 
@@ -603,9 +605,6 @@ def adjust_learning_rate(optimizer, epoch):
 
 def tensor2img(var):
     var = var.cpu().detach().numpy().transpose([1,2,0])
-    #var = var * 255
-    #var[var < 0] = 0
-    #var[var > 255] = 255
     var[var < 0] = 0
     var[var > 1] = 1
     var = var * 255
