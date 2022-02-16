@@ -1,5 +1,7 @@
 # encoding: utf-8
 import os
+import cv2
+import math
 import time
 import shutil
 import argparse
@@ -23,6 +25,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from utils.dataset import ImageDataset
 from models.RevealNet import RevealNet
 from models.HidingUNet import UnetGenerator
+
 
 
 parser = argparse.ArgumentParser()
@@ -142,7 +145,7 @@ def main():
             os.makedirs(opt.container_dir, exist_ok=True)
         
         elif opt.mode == 'extract':
-            assert os.path.exists(opt.secret_path), "[!]Please input the path of original secret image"
+            #assert os.path.exists(opt.secret_path), "[!]Please input the path of original secret image"
 
             opt.experiment_dir = opt.output_dir
             opt.outlogs = os.path.join(opt.experiment_dir, "ExtractingLogs")
@@ -176,9 +179,9 @@ def main():
             transforms.ToTensor()
         ])
     else:
-         transforms_secret = transforms.Compose([
-             transforms.Resize([opt.imageSize, opt.imageSize]), 
-             transforms.ToTensor()
+        transforms_secret = transforms.Compose([
+            transforms.Resize([opt.imageSize, opt.imageSize]), 
+            transforms.ToTensor()
         ])
         
     if opt.Rnet_inchannel == 1:  
@@ -240,6 +243,9 @@ def main():
 
         secret_img = random_bits.unsqueeze(dim=0)
 
+        """
+        secret_dataset = ImageDataset(root=opt.origin_dir, transforms=transforms_secret)
+        """
         cover_dataset = ImageDataset(root=opt.origin_dir, transforms=transforms_cover)
 
         Hnet = UnetGenerator(input_nc=opt.Hnet_inchannel, output_nc=opt.Hnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid())
@@ -263,6 +269,7 @@ def main():
                 transforms.ToTensor()
             ])
         
+        """
         print("[*]Load secret image at: {}".format(opt.secret_path))
         secret_img = Image.open(opt.secret_path)
         if len(secret_img.getbands()) == 1:
@@ -273,6 +280,7 @@ def main():
             transforms.ToTensor()
         ])
         secret_img = secret_transform(secret_img).to(opt.device)
+        """
 
         container_dataset = ImageDataset(root=opt.container_dir, transforms=transforms_container)
 
@@ -348,12 +356,21 @@ def main():
 
      # For testing the trained network
     elif opt.mode == 'generate':
+        """
+        secret_loader = DataLoader(
+            secret_dataset,
+            batch_size=opt.bs_generate,
+            shuffle=True,
+            num_workers=int(opt.workers)
+        )
+        """
         cover_loader = DataLoader(
             cover_dataset, 
             batch_size=opt.bs_generate,
             shuffle=False, 
             num_workers=int(opt.workers)
         )
+        #generate(dataset=cover_dataset, sec_loader=secret_loader, cov_loader=cover_loader, Hnet=Hnet)
         generate(dataset=cover_dataset, cov_loader=cover_loader, Hnet=Hnet)
     elif opt.mode == 'extract':
         container_loader = DataLoader(
@@ -375,6 +392,47 @@ def save_checkpoint(state, is_best):
         shutil.copyfile(checkpoint_path, os.path.join(opt.outckpts, 'best_checkpoint.pth.tar'))
 
 
+def draw_polygon(sides, radius=1, rotation=0, location=None):
+    one_segment = math.pi * 2 / sides
+
+    if type(radius) == list:
+        points = [(math.sin(one_segment * i + rotation) * radius[i], math.cos(one_segment * i + rotation) * radius[i]) for i in range(sides)]
+    else:
+        points = [(math.sin(one_segment * i + rotation) * radius, math.cos(one_segment * i + rotation) * radius) for i in range(sides)]
+
+    if location is not None:
+        points = np.array([[sum(pair) for pair in zip(point, location)] for point in points], dtype=np.int32)
+
+    return points    
+
+
+def image_distorion(image):
+    _, img_channel, img_hight, img_width = image.size()
+    image_dis = torch.zeros_like(image)
+    mask = torch.zeros_like(image)
+
+    for idx, img_ori in enumerate(image):
+        sides = np.random.randint(low=3, high=15, size=1)[0]
+        radius = list(np.random.randint(low=5, high=50, size=sides))
+        location = np.random.randint(low=max(radius), high=min(img_hight, img_width)-max(radius), size=2)
+
+        contour_pts = draw_polygon(sides=sides, radius=radius, rotation=0, location=location) # (x,y)
+
+        mask_ori = np.zeros((img_hight, img_width, img_channel), dtype=np.uint8)
+        cv2.drawContours(image=mask_ori, contours=[contour_pts], contourIdx=-1, color=(255,255,255), thickness=-1)
+
+        mask_ori = transforms.Compose([transforms.ToTensor()])(mask_ori).to(opt.device)
+        mask_inv = torch.ones_like(mask_ori) - mask_ori
+        mask_dis = mask_ori * torch.rand_like(input=mask_ori)
+
+        img_dis = img_ori * mask_dis + img_ori * mask_inv
+
+        image_dis[idx] = img_dis
+        mask[idx] = mask_ori # !!!
+
+    return image_dis, mask
+
+
 def forward_pass(secret_img, cover_img, Hnet, Rnet, criterion):
     secret_img = secret_img.to(opt.device)
     cover_img = cover_img.to(opt.device)
@@ -385,12 +443,19 @@ def forward_pass(secret_img, cover_img, Hnet, Rnet, criterion):
 
     errH = criterion(container_img, cover_img)  # Hiding net
 
-    rev_secret_img = Rnet(container_img) 
-    errR = criterion(rev_secret_img, secret_img)  # Reveal net
+    img_tampered, mask = image_distorion(container_img)
+    #mask_secret_img = secret_img * mask
+
+    #rev_secret_img = Rnet(container_img) 
+    #errR = criterion(rev_secret_img, secret_img)  # Reveal net 
+    #mask_secret_img = itm_secret_img * (torch.ones_like(mask) - mask) 
+    mask_secret_img = secret_img * (torch.ones_like(mask) - mask) 
+    rev_secret_img = Rnet(img_tampered) 
+    errR = criterion(rev_secret_img, mask_secret_img)  # Reveal net
 
     diffH = (container_img-cover_img).abs().mean()*255
-    diffR = (rev_secret_img-secret_img).abs().mean()*255
-    return cover_img, container_img, secret_img, rev_secret_img, errH, errR, diffH, diffR
+    diffR = (rev_secret_img-mask_secret_img).abs().mean()*255
+    return cover_img, itm_secret_img, container_img, img_tampered, mask, mask_secret_img, rev_secret_img, errH, errR, diffH, diffR
 
 
 def train(train_loader, epoch, Hnet, Rnet, criterion):
@@ -412,7 +477,7 @@ def train(train_loader, epoch, Hnet, Rnet, criterion):
 
         data_time.update(time.time() - start_time)
 
-        cover_imgv, container_img, secret_imgv_nh, rev_secret_img, errH, errR, diffH, diffR = forward_pass(secret_img, cover_img, Hnet, Rnet, criterion)
+        cover_img, itm_secret_img, container_img, img_tampered, mask, mask_secret_img, rev_secret_img, errH, errR, diffH, diffR = forward_pass(secret_img, cover_img, Hnet, Rnet, criterion)
 
         Hlosses.update(errH.data, opt.bs_train)  # H loss
         Rlosses.update(errR.data, opt.bs_train)  # R loss
@@ -441,13 +506,13 @@ def train(train_loader, epoch, Hnet, Rnet, criterion):
             print(log)
 
         if epoch <= 0 and i % opt.resultPicFrequency == 0:
-            save_result_pic(opt.dis_num, cover_imgv, container_img.data, secret_imgv_nh, rev_secret_img.data, epoch, i, opt.trainpics)
+            save_result_pic(opt.dis_num, cover_img, itm_secret_img.data, container_img.data, img_tampered, mask, mask_secret_img.data, rev_secret_img.data, epoch, i, opt.trainpics)
             
         if i == opt.max_train_iters-1:
             break
 
     # To save the last batch only
-    save_result_pic(opt.dis_num, cover_imgv, container_img.data, secret_imgv_nh, rev_secret_img.data, epoch, i, opt.trainpics)
+    save_result_pic(opt.dis_num, cover_img, itm_secret_img.data, container_img.data, img_tampered, mask, mask_secret_img.data, rev_secret_img.data, epoch, i, opt.trainpics)
 
     epoch_log = "Training[{:d}] Hloss={:.6f} Rloss={:.6f} SumLoss={:.6f} Hdiff={:.4f} Rdiff={:.4f} lr={:.6f} Epoch time={:.4f}".format(
         epoch, Hlosses.avg, Rlosses.avg, SumLosses.avg, Hdiff.avg, Rdiff.avg, optimizer.param_groups[0]['lr'], batch_time.sum
@@ -479,7 +544,7 @@ def validation(val_loader, epoch, Hnet, Rnet, criterion):
 
     for i, (secret_img, cover_img) in enumerate(val_loader):
 
-        cover_imgv, container_img, secret_imgv_nh, rev_secret_img, errH, errR, diffH, diffR = forward_pass(secret_img, cover_img, Hnet, Rnet, criterion)
+        cover_img, itm_secret_img, container_img, img_tampered, mask, mask_secret_img, rev_secret_img, errH, errR, diffH, diffR = forward_pass(secret_img, cover_img, Hnet, Rnet, criterion)
 
         Hlosses.update(errH.data, opt.bs_train)  # H loss
         Rlosses.update(errR.data, opt.bs_train)  # R loss
@@ -500,7 +565,7 @@ def validation(val_loader, epoch, Hnet, Rnet, criterion):
         if i % opt.logFrequency == 0:
             print(val_log)
     
-    save_result_pic(opt.dis_num, cover_imgv, container_img.data, secret_imgv_nh, rev_secret_img.data, epoch, i, opt.validationpics)
+    save_result_pic(opt.dis_num, cover_img, itm_secret_img.data, container_img.data, img_tampered, mask, mask_secret_img.data, rev_secret_img.data, epoch, i, opt.validationpics)
     
     val_log = "Validation[{:d}] val_Hloss = {:.6f} val_Rloss = {:.6f} val_Hdiff = {:.4f} val_Rdiff={:.4f} batch time={:.4f}".format(
         epoch, Hlosses.avg, Rlosses.avg, Hdiff.avg, Rdiff.avg, batch_time.sum)
@@ -516,6 +581,33 @@ def validation(val_loader, epoch, Hnet, Rnet, criterion):
     return Hlosses.avg, Rlosses.avg, Hdiff.avg, Rdiff.avg
 
 
+"""
+def generate(dataset, sec_loader, cov_loader, Hnet):
+    Hnet.eval()
+
+    idx = 0
+    for batch in tqdm(zip(sec_loader, cov_loader)):
+        secret_batch, cover_batch = batch
+        secret_batch = secret_batch.to(opt.device)
+        cover_batch = cover_batch.to(opt.device)
+
+        pro_secret_batch = Hnet(secret_batch) * opt.Hnet_factor
+
+        container_batch = pro_secret_batch + cover_batch
+
+        for i, container in enumerate(container_batch):
+            pro_secret_img = tensor2img(pro_secret_batch[i])
+            cover_img = tensor2img(cover_batch[i])
+            container_img = tensor2img(container)
+
+            img_name = os.path.basename(dataset.image_paths[idx])
+
+            pro_secret_img.save(os.path.join(opt.secret_dir, img_name))
+            cover_img.save(os.path.join(opt.cover_dir, img_name))
+            container_img.save(os.path.join(opt.container_dir, img_name))
+            
+            idx += 1
+"""
 def generate(dataset, cov_loader, Hnet):
     Hnet.eval()
 
@@ -548,18 +640,20 @@ def extract(dataset, con_loader, Rnet):
     Rnet.eval()
 
     idx = 0
-    err_ratio = 0.0
+    #err_ratio = 0.0
     for container_batch in tqdm(con_loader):
         container_batch = container_batch.to(opt.device)
-        batch_size_container, _, _, _ = container_batch.size()
+        #batch_size_container, _, _, _ = container_batch.size()
 
-        secret_img_batch = secret_img.repeat(batch_size_container, 1, 1, 1)
+        #secret_img_batch = secret_img.repeat(batch_size_container, 1, 1, 1)
 
         rev_secret_batch = Rnet(container_batch) # rev_secret_img: bs x 3 x 256 x 256
         
+        """
         err = rev_secret_batch - secret_img_batch
         err = err.abs().sum(dim=(1,2,3)) / (3 * opt.imageSize * opt.imageSize)
         err_ratio += err
+        """
         
         for _, rev_secret in enumerate(rev_secret_batch):
             rev_secret_img = tensor2img(rev_secret)
@@ -570,8 +664,9 @@ def extract(dataset, con_loader, Rnet):
 
             idx += 1
 
-    accuracy_percent = (1 - err_ratio/idx) * 100
-    print("Total average correct bit reveal accuracy: {:.4f}".format(accuracy_percent.mean().item()))
+    #accuracy_percent = (1 - err_ratio/idx) * 100
+    #print("Total average correct bit reveal accuracy: {:.4f}".format(accuracy_percent.mean().item()))
+
 
 
 def print_log(log_info, log_path, console=True):
@@ -605,19 +700,19 @@ def tensor2img(var):
         var = np.squeeze(var, axis=2)
     return Image.fromarray(var.astype('uint8'))
     
-
-def save_result_pic(dis_num, cover, container, secret, rev_secret, epoch, i, save_path):
+def save_result_pic(dis_num, cover, itm_secret, container, tampered, mask, mask_secret, rev_secret, epoch, i, save_path):
     if opt.debug:
         save_path='./debug/debug_images'
     resultImgName = os.path.join(save_path, 'ResultPics_epoch{:03d}_batch{:04d}.png'.format(epoch, i))
 
     cover_gap = container - cover
-    secret_gap = rev_secret - secret
     cover_gap = (cover_gap*10 + 0.5).clamp_(0.0, 1.0)
-    secret_gap = (secret_gap*10 + 0.5).clamp_(0.0, 1.0)
+    
+    mask_secret_gap = rev_secret - mask_secret
+    mask_secret_gap = (mask_secret_gap*10 + 0.5).clamp_(0.0, 1.0)
 
-    fig = plt.figure(figsize=(24, 4*dis_num))
-    gs = fig.add_gridspec(nrows=dis_num, ncols=6)
+    fig = plt.figure(figsize=(36, 4*dis_num))
+    gs = fig.add_gridspec(nrows=dis_num, ncols=9)
     for img_idx in range(dis_num):
         fig.add_subplot(gs[img_idx, 0])
         cov_img = tensor2img(cover[img_idx])
@@ -625,29 +720,44 @@ def save_result_pic(dis_num, cover, container, secret, rev_secret, epoch, i, sav
         plt.title("Cover Image")
 
         fig.add_subplot(gs[img_idx, 1])
+        itmsec_img = tensor2img(itm_secret[img_idx])
+        plt.imshow(itmsec_img)
+        plt.title("Itm Secret")
+
+        fig.add_subplot(gs[img_idx, 2])
         con_img = tensor2img(container[img_idx])
         plt.imshow(con_img)
         plt.title("Container Image")
 
-        fig.add_subplot(gs[img_idx, 2])
+        fig.add_subplot(gs[img_idx, 3])
         covgap_img = tensor2img(cover_gap[img_idx])
         plt.imshow(covgap_img)
-        plt.title("Cover_gap Image")
-
-        fig.add_subplot(gs[img_idx, 3])
-        sec_img = tensor2img(secret[img_idx])
-        plt.imshow(sec_img)
-        plt.title("Secret Image")
+        plt.title("Cover Gap")
 
         fig.add_subplot(gs[img_idx, 4])
-        revsec_img = tensor2img(rev_secret[img_idx])
-        plt.imshow(revsec_img)
-        plt.title("Rev_secret Image")
+        tam_img = tensor2img(tampered[img_idx])
+        plt.imshow(tam_img)
+        plt.title("Tampered Image")
 
         fig.add_subplot(gs[img_idx, 5])
-        secgap_img = tensor2img(secret_gap[img_idx])
-        plt.imshow(secgap_img)
-        plt.title("Secret_gap Image")
+        mask_img = tensor2img(mask[img_idx])
+        plt.imshow(mask_img)
+        plt.title("Mask")
+
+        fig.add_subplot(gs[img_idx, 6])
+        masksec_img = tensor2img(mask_secret[img_idx])
+        plt.imshow(masksec_img)
+        plt.title("Masked Secret")
+
+        fig.add_subplot(gs[img_idx, 7])
+        revsec_img = tensor2img(rev_secret[img_idx])
+        plt.imshow(revsec_img)
+        plt.title("Retrieved Secret")        
+
+        fig.add_subplot(gs[img_idx, 8])
+        masksec_gap = tensor2img(mask_secret_gap[img_idx])
+        plt.imshow(masksec_gap)
+        plt.title("Masked Secret Gap")
     
     plt.tight_layout()
     fig.savefig(resultImgName)
