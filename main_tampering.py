@@ -64,6 +64,7 @@ parser.add_argument('--secret_dir', type=str, default='', help='directory of sec
 
 parser.add_argument('--max_epoch', type=int, default=50, help='number of epochs to train for')
 parser.add_argument('--dis_num', type=int, default=5, help='number of example image for visualization')
+parser.add_argument('--threshold', type=float, default=0.9, help='value to decide whether a pixel is tampered')
 
 parser.add_argument('--mode', type=str, default='', help='train | generate | extract')
 parser.add_argument('--origin_dir', type=str, default='', help='directory of original images')
@@ -98,8 +99,6 @@ def main():
     opt.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     print("[*]Running on device: {}".format(opt.device))
 
-    cudnn.benchmark = True
-
     ##################  Create the dirs to save the result ##################
     if not opt.debug:
         cur_time = time.strftime('%Y-%m-%d_H%H-%M-%S', time.localtime())
@@ -133,9 +132,6 @@ def main():
             opt.experiment_dir = opt.output_dir
             print("[*]Saving the generation results at {}".format(opt.experiment_dir))
 
-            opt.outlogs = os.path.join(opt.experiment_dir, "GeneratingLogs")
-            os.makedirs(opt.outlogs, exist_ok=True)
-
             opt.secret_dir = os.path.join(opt.experiment_dir, "pro_secret")
             print("[*]Generating processed secret images at: {}".format(opt.secret_dir))
             os.makedirs(opt.secret_dir, exist_ok=True)
@@ -150,8 +146,6 @@ def main():
         
         elif opt.mode == 'extract':
             opt.experiment_dir = opt.output_dir
-            opt.outlogs = os.path.join(opt.experiment_dir, "ExtractingLogs")
-            os.makedirs(opt.outlogs, exist_ok=True)
 
             opt.rev_secret_dir = os.path.join(opt.experiment_dir, "rev_secret")
             print("[*]Generating retrieved secret images at: {}".format(opt.rev_secret_dir))
@@ -588,7 +582,7 @@ def extract(dataset, con_loader, Rnet):
         for _, rev_secret in enumerate(rev_secret_bath):
             img_name = os.path.basename(dataset.image_paths[idx])
 
-            detection_img = (rev_secret < 0.9).type(torch.int8)
+            detection_img = (rev_secret < opt.threshold).type(torch.int8)
 
             img_ori = tensor2array(detection_img)
             img_gray = cv2.cvtColor(img_ori, cv2.COLOR_RGB2GRAY)
