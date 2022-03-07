@@ -272,7 +272,7 @@ def main():
     if opt.mode == 'train':
         params = list(Hnet.parameters())+list(Rnet.parameters())
         optimizer = optim.Adam(params, lr=opt.lr, betas=(opt.beta_adam, 0.999))
-        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.2, patience=8, verbose=True)        
+        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.2, patience=8, verbose=True)
 
         train_loader_cover = DataLoader(
             train_dataset_cover,
@@ -467,7 +467,7 @@ def train(train_loader, epoch, Hnet, Rnet, criterion):
 
         if epoch <= 0 and i % opt.resultPicFrequency == 0:
             save_result_pic(opt.dis_num, cover_img, itm_secret_img.data, container_img.data, img_tampered.data, mask, mask_secret_img.data, rev_secret_img.data, epoch, i, opt.trainpics)
-            
+
         if i == opt.max_train_iters-1:
             break
 
@@ -496,7 +496,7 @@ def validation(val_loader, epoch, Hnet, Rnet, criterion):
     Rlosses = AverageMeter()  
     Hdiff = AverageMeter()
     Rdiff = AverageMeter()
-        
+
     start_time = time.time()
 
     Hnet.eval()
