@@ -323,9 +323,14 @@ def main():
             scheduler.step(val_rloss) # 注意！这里只用 R 网络的 loss 进行 learning rate 的更新
 
             # Save the best model parameters
+            """
             sum_diff = val_adiff + val_hdiff + val_rdiff
             is_best = sum_diff < globals()["smallestLoss"]
             globals()["smallestLoss"] = sum_diff
+            """
+            sum_loss = val_aloss + val_hloss + val_rloss             
+            is_best = sum_loss < globals()["smallestLoss"]             
+            globals()["smallestLoss"] = sum_loss
 
             stat_dict = {
                 'epoch': epoch + 1,
@@ -339,8 +344,6 @@ def main():
             save_checkpoint(stat_dict, is_best)
 
         writer.close()
-
-     # For testing the trained network
     elif opt.mode == 'generate':
         cover_loader = DataLoader(
             cover_dataset, 
@@ -423,21 +426,17 @@ def forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion):
     img_tampered, tampered_mask = image_distorion(container_img) 
     tampered_secret = secret_img * (torch.ones_like(tampered_mask) - tampered_mask) 
 
-    img_adversarial = Anet(container_img)
-    adversarial_secret = secret_img.detach().clone().to(opt.device)
+    img_adversarial = Anet(img_tampered)
 
-    img_watermarked = torch.cat([img_tampered, img_adversarial], dim=0)
-    all_secret_img = torch.cat([tampered_secret, adversarial_secret], dim=0)
+    rev_secret_img = Rnet(img_adversarial) 
 
-    rev_secret_img = Rnet(img_watermarked) 
+    errR = criterion(rev_secret_img, tampered_secret)  # Reveal net
 
-    errR = criterion(rev_secret_img, all_secret_img)  # Reveal net
-
-    errA = 15*criterion(img_adversarial, cover_img) - criterion(rev_secret_img[len(tampered_secret):], adversarial_secret)
+    errA = 15*criterion(img_adversarial, cover_img) - criterion(rev_secret_img, tampered_secret)
 
     diffA = (img_adversarial-cover_img).abs().mean()*255
     diffH = (container_img-cover_img).abs().mean()*255
-    diffR = (rev_secret_img-all_secret_img).abs().mean()*255
+    diffR = (rev_secret_img-tampered_secret).abs().mean()*255
 
     image_dict = {
         'cover': cover_img,
@@ -446,8 +445,6 @@ def forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion):
         'img_tampered': img_tampered,
         'tampered_secret': tampered_secret,
         'img_adversarial': img_adversarial,
-        'adversarial_secret': adversarial_secret,
-        'all_secret': all_secret_img, 
         'rev_secret': rev_secret_img
     }
     data_dict = {
@@ -472,41 +469,46 @@ def train(train_loader, epoch, Anet, Hnet, Rnet, criterion):
     Hdiff = AverageMeter()
     Rdiff = AverageMeter()
 
-    # Switch to train mode
-    Anet.train()
-    Hnet.train()
-    Rnet.train()
-
     start_time = time.time()
 
     for i, (secret_img, cover_img) in enumerate(train_loader):
 
         data_time.update(time.time() - start_time)
 
-        #cover_img, itm_secret_img, container_img, img_tampered, mask, mask_secret_img, rev_secret_img, errH, errR, diffH, diffR = forward_pass(secret_img, cover_img, Hnet, Rnet, criterion)
+        ##### Train Hiding Net and Reveal Net #####
+        Anet.eval()
+        Hnet.train()
+        Rnet.train()
         image_dict, data_dict = forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion)
 
-        Alosses.update(data_dict['errA'].data, opt.bs_train)  # A loss
         Hlosses.update(data_dict['errH'].data, opt.bs_train)  # H loss
-        Rlosses.update(data_dict['errR'].data, 2*opt.bs_train)  # R loss
-        SumLosses.update(data_dict['errH'].data + data_dict['errH'].data + data_dict['errR'].data, opt.bs_train) # A loss + H loss + R loss
-        Adiff.update(data_dict['diffA'].data, opt.bs_train)
+        Rlosses.update(data_dict['errR'].data, opt.bs_train)  # R loss
         Hdiff.update(data_dict['diffH'].data, opt.bs_train)
-        Rdiff.update(data_dict['diffR'].data, 2*opt.bs_train)
+        Rdiff.update(data_dict['diffR'].data, opt.bs_train)
 
-        # Loss, backprop, and optimization step
-        err_A = data_dict['errA']
-        optimizer_A.zero_grad()
-        err_A.backward()
-        optimizer_A.step()
-        
         betaerrR_secret = opt.beta * data_dict['errR']
         err_sum = data_dict['errH'] + betaerrR_secret
         optimizer_HR.zero_grad()
         err_sum.backward()
         optimizer_HR.step()
 
-        # Time spent on one batch
+        ##### Train Adversarial Net #####
+        Anet.train()
+        Hnet.eval()
+        Rnet.eval()
+        image_dict, data_dict = forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion)
+
+        Alosses.update(data_dict['errA'].data, opt.bs_train)  # A loss
+        Adiff.update(data_dict['diffA'].data, opt.bs_train)
+
+        err_A = data_dict['errA']
+        optimizer_A.zero_grad()
+        err_A.backward()
+        optimizer_A.step()
+
+        SumLosses.update(data_dict['errH'].data + data_dict['errH'].data + data_dict['errR'].data, opt.bs_train) # A loss + H loss + R loss
+
+        ##### Time spent on one batch #####
         batch_time.update(time.time() - start_time)
         start_time = time.time()
 
@@ -562,7 +564,6 @@ def validation(val_loader, epoch, Anet, Hnet, Rnet, criterion):
 
     for i, (secret_img, cover_img) in enumerate(val_loader):
 
-        #cover_img, itm_secret_img, container_img, img_tampered, mask, mask_secret_img, rev_secret_img, errH, errR, diffH, diffR = forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion)
         image_dict, data_dict = forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion)
 
         Alosses.update(data_dict['errH'].data, opt.bs_train)  # A loss
@@ -716,8 +717,11 @@ def save_result_pic(dis_num, image_dict, epoch, i, save_path):
     cover_gap = image_dict['container'] - image_dict['cover']
     cover_gap = (cover_gap*10 + 0.5).clamp_(0.0, 1.0)
     
-    mask_secret_gap = image_dict['rev_secret'] - image_dict['all_secret']
+    mask_secret_gap = image_dict['rev_secret'] - image_dict['tampered_secret']
     mask_secret_gap = (mask_secret_gap*10 + 0.5).clamp_(0.0, 1.0)
+
+    adversarial_gap = image_dict['img_adversarial'] - image_dict['img_tampered']
+    adversarial_gap = (adversarial_gap*10 + 0.5).clamp_(0.0, 1.0)
 
     fig = plt.figure(figsize=(40, 4*dis_num))
     gs = fig.add_gridspec(nrows=dis_num, ncols=10)
@@ -758,19 +762,19 @@ def save_result_pic(dis_num, image_dict, epoch, i, save_path):
         plt.title("Rev_Tampered Mask")
 
         fig.add_subplot(gs[img_idx, 7])
+        masksec_gap = tensor2img(mask_secret_gap[img_idx])
+        plt.imshow(masksec_gap)
+        plt.title("Masked Secret Gap")
+
+        fig.add_subplot(gs[img_idx, 8])
         tam_img = tensor2img(image_dict['img_adversarial'][img_idx])
         plt.imshow(tam_img)
         plt.title("Adversarial Image")
 
-        fig.add_subplot(gs[img_idx, 8])
-        mask_img = tensor2img(image_dict['rev_secret'][len(image_dict['img_adversarial'])+img_idx])
-        plt.imshow(mask_img)
-        plt.title("Rev_Adversarial Secret")   
-
         fig.add_subplot(gs[img_idx, 9])
-        masksec_gap = tensor2img(mask_secret_gap[img_idx])
-        plt.imshow(masksec_gap)
-        plt.title("Masked Secret Gap")
+        mask_img = tensor2img(adversarial_gap[img_idx])
+        plt.imshow(mask_img)
+        plt.title("Adversarial Gap")
     
     plt.tight_layout()
     fig.savefig(resultImgName)
