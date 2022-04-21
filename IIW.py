@@ -6,6 +6,7 @@ import math
 import time
 import shutil
 import argparse
+from cv2 import threshold
 from matplotlib import container
 import numpy as np
 from PIL import Image
@@ -266,12 +267,16 @@ def main():
 
         container_dataset = ImageDataset(root=opt.container_dir, transforms=transforms_container)
 
+        #Anet = Adversary(input_nc=opt.Hnet_outchannel, output_nc=opt.Rnet_inchannel)
+        #Anet.to(opt.device)
+
         Rnet = RevealNet(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid())
         Rnet.to(opt.device)
 
         # Load Pre-trained mode
         if opt.checkpoint != "":
             checkpoint = torch.load(opt.checkpoint)
+            #Anet.load_state_dict(checkpoint['A_state_dict'], strict=True)
             Rnet.load_state_dict(checkpoint['R_state_dict'], strict=True)
 
     # Print networks
@@ -360,6 +365,7 @@ def main():
             num_workers=int(opt.workers)
         )
         extract(dataset=container_dataset, con_loader=container_loader, Rnet=Rnet)
+        #extract(dataset=container_dataset, con_loader=container_loader, Anet=Anet, Rnet=Rnet)
 
 
 def save_checkpoint(state, is_best):
@@ -413,7 +419,7 @@ def image_distorion(image):
     return image_dis, mask
 
 
-def forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion):
+def forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion, threshold):
     secret_img = secret_img.to(opt.device)
     cover_img = cover_img.to(opt.device)
 
@@ -426,7 +432,10 @@ def forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion):
     img_tampered, tampered_mask = image_distorion(container_img) 
     tampered_secret = secret_img * (torch.ones_like(tampered_mask) - tampered_mask) 
 
-    img_adversarial = Anet(img_tampered)
+    if np.random.rand() > threshold:
+        img_adversarial = Anet(img_tampered)
+    else:
+        img_adversarial = img_tampered
 
     rev_secret_img = Rnet(img_adversarial) 
 
@@ -479,7 +488,7 @@ def train(train_loader, epoch, Anet, Hnet, Rnet, criterion):
         Anet.eval()
         Hnet.train()
         Rnet.train()
-        image_dict, data_dict = forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion)
+        image_dict, data_dict = forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion, threshold=0.5)
 
         Hlosses.update(data_dict['errH'].data, opt.bs_train)  # H loss
         Rlosses.update(data_dict['errR'].data, opt.bs_train)  # R loss
@@ -496,7 +505,7 @@ def train(train_loader, epoch, Anet, Hnet, Rnet, criterion):
         Anet.train()
         Hnet.eval()
         Rnet.eval()
-        image_dict, data_dict = forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion)
+        image_dict, data_dict = forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion, threshold=0.0)
 
         Alosses.update(data_dict['errA'].data, opt.bs_train)  # A loss
         Adiff.update(data_dict['diffA'].data, opt.bs_train)
@@ -564,7 +573,7 @@ def validation(val_loader, epoch, Anet, Hnet, Rnet, criterion):
 
     for i, (secret_img, cover_img) in enumerate(val_loader):
 
-        image_dict, data_dict = forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion)
+        image_dict, data_dict = forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion, threshold=0.5)
 
         Alosses.update(data_dict['errH'].data, opt.bs_train)  # A loss
         Hlosses.update(data_dict['errH'].data, opt.bs_train)  # H loss
@@ -637,6 +646,7 @@ def generate(dataset, cov_loader, Hnet):
 
 
 def extract(dataset, con_loader, Rnet):
+#def extract(dataset, con_loader, Anet, Rnet):
     Rnet.eval()
 
     idx = 0
@@ -645,6 +655,9 @@ def extract(dataset, con_loader, Rnet):
         container_batch = container_batch.to(opt.device)
 
         rev_secret_bath = Rnet(container_batch)
+
+        #adversarial_img = Anet(container_batch)
+        #rev_secret_bath = Rnet(adversarial_img)
 
         for _, rev_secret in enumerate(rev_secret_bath):
             img_name = os.path.basename(dataset.image_paths[idx])
