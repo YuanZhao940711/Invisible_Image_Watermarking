@@ -267,8 +267,8 @@ def main():
 
         container_dataset = ImageDataset(root=opt.container_dir, transforms=transforms_container)
 
-        #Anet = Adversary(input_nc=opt.Hnet_outchannel, output_nc=opt.Rnet_inchannel)
-        #Anet.to(opt.device)
+        Anet = Adversary(input_nc=opt.Hnet_outchannel, output_nc=opt.Rnet_inchannel)
+        Anet.to(opt.device)
 
         Rnet = RevealNet(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid())
         Rnet.to(opt.device)
@@ -276,7 +276,7 @@ def main():
         # Load Pre-trained mode
         if opt.checkpoint != "":
             checkpoint = torch.load(opt.checkpoint)
-            #Anet.load_state_dict(checkpoint['A_state_dict'], strict=True)
+            Anet.load_state_dict(checkpoint['A_state_dict'], strict=True)
             Rnet.load_state_dict(checkpoint['R_state_dict'], strict=True)
 
     # Print networks
@@ -483,30 +483,13 @@ def train(train_loader, epoch, Anet, Hnet, Rnet, criterion):
     for i, (secret_img, cover_img) in enumerate(train_loader):
 
         data_time.update(time.time() - start_time)
-
-        ##### Train Hiding Net and Reveal Net #####
-        Anet.eval()
-        Hnet.train()
-        Rnet.train()
-        image_dict, data_dict = forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion, threshold=0.5)
-
-        Hlosses.update(data_dict['errH'].data, opt.bs_train)  # H loss
-        Rlosses.update(data_dict['errR'].data, opt.bs_train)  # R loss
-        Hdiff.update(data_dict['diffH'].data, opt.bs_train)
-        Rdiff.update(data_dict['diffR'].data, opt.bs_train)
-
-        betaerrR_secret = opt.beta * data_dict['errR']
-        err_sum = data_dict['errH'] + betaerrR_secret
-        optimizer_HR.zero_grad()
-        err_sum.backward()
-        optimizer_HR.step()
-
+        
         ##### Train Adversarial Net #####
         Anet.train()
         Hnet.eval()
         Rnet.eval()
         image_dict, data_dict = forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion, threshold=0.0)
-
+        
         Alosses.update(data_dict['errA'].data, opt.bs_train)  # A loss
         Adiff.update(data_dict['diffA'].data, opt.bs_train)
 
@@ -515,7 +498,24 @@ def train(train_loader, epoch, Anet, Hnet, Rnet, criterion):
         err_A.backward()
         optimizer_A.step()
 
-        SumLosses.update(data_dict['errH'].data + data_dict['errH'].data + data_dict['errR'].data, opt.bs_train) # A loss + H loss + R loss
+        ##### Train Hiding Net and Reveal Net #####
+        Anet.eval()
+        Hnet.train()
+        Rnet.train()
+        image_dict, data_dict = forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion, threshold=0.5)
+
+        betaerrR_secret = opt.beta * data_dict['errR']
+        err_sum = data_dict['errH'] + betaerrR_secret
+        optimizer_HR.zero_grad()
+        err_sum.backward()
+        optimizer_HR.step()
+
+        Hlosses.update(data_dict['errH'].data, opt.bs_train)  # H loss
+        Rlosses.update(data_dict['errR'].data, opt.bs_train)  # R loss
+        Hdiff.update(data_dict['diffH'].data, opt.bs_train)
+        Rdiff.update(data_dict['diffR'].data, opt.bs_train)
+
+        SumLosses.update(data_dict['errH'].data + data_dict['errR'].data, opt.bs_train) # H loss + R loss
 
         ##### Time spent on one batch #####
         batch_time.update(time.time() - start_time)
@@ -573,7 +573,7 @@ def validation(val_loader, epoch, Anet, Hnet, Rnet, criterion):
 
     for i, (secret_img, cover_img) in enumerate(val_loader):
 
-        image_dict, data_dict = forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion, threshold=0.5)
+        image_dict, data_dict = forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion, threshold=0.0)
 
         Alosses.update(data_dict['errH'].data, opt.bs_train)  # A loss
         Hlosses.update(data_dict['errH'].data, opt.bs_train)  # H loss
