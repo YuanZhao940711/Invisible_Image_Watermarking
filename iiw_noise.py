@@ -1,5 +1,6 @@
 # encoding: utf-8
 
+from logging import root
 import os
 import cv2
 import math
@@ -78,6 +79,8 @@ parser.add_argument('--container_dir', type=str, default='', help='directory of 
 parser.add_argument('--compression', type=str, default='No')
 parser.add_argument('--com_quality', type=int, default=70)
 
+parser.add_argument('--gen_mode', type=str, default='white', help='white | random | same')
+
 
 
 # Custom weights initialization called on netG and netD
@@ -100,7 +103,7 @@ def print_network(net):
 
 def main():
     ############### Define global parameters ###############
-    global opt, optimizer_A, optimizer_HR, writer, logPath, scheduler, schedulerR, val_loader, smallestLoss, secret_img
+    global opt, optimizer_A, optimizer_HR, writer, logPath, scheduler, val_loader, smallestLoss, secret_img
 
     opt = parser.parse_args()
     opt.Hnet_factor = 1
@@ -139,9 +142,13 @@ def main():
         opt.experiment_dir = opt.output_dir
         print("[*]Saving the generation results at {}".format(opt.experiment_dir))
 
-        opt.secret_dir = os.path.join(opt.experiment_dir, "pro_secret")
-        print("[*]Generating processed secret images at: {}".format(opt.secret_dir))
-        os.makedirs(opt.secret_dir, exist_ok=True)
+        opt.ori_secret_dir = os.path.join(opt.experiment_dir, "secret")
+        print("[*]Generating secret images at: {}".format(opt.ori_secret_dir))
+        os.makedirs(opt.ori_secret_dir, exist_ok=True)
+
+        opt.pro_secret_dir = os.path.join(opt.experiment_dir, "pro_secret")
+        print("[*]Generating processed secret images at: {}".format(opt.pro_secret_dir))
+        os.makedirs(opt.pro_secret_dir, exist_ok=True)
             
         opt.cover_dir = os.path.join(opt.experiment_dir, "cover")
         print("[*]Generating cover images at: {}".format(opt.cover_dir))
@@ -157,6 +164,10 @@ def main():
         opt.rev_secret_dir = os.path.join(opt.experiment_dir, "rev_secret")
         print("[*]Generating retrieved secret images at: {}".format(opt.rev_secret_dir))
         os.makedirs(opt.rev_secret_dir, exist_ok=True)
+
+        opt.rev_mask_dir = os.path.join(opt.experiment_dir, "rev_mask")
+        print("[*]Generating retrieved masks at: {}".format(opt.rev_mask_dir))
+        os.makedirs(opt.rev_mask_dir, exist_ok=True)
 
     ################## Datasets and Networks ##################
     if opt.norm == 'instance':
@@ -228,21 +239,29 @@ def main():
             raise ValueError("Invalid Loss Function. Must be one of [l1, l2]")
 
     elif opt.mode == 'generate':
-        # Secret Image
-        random_bits = np.ones((opt.imageSize, opt.imageSize), dtype=np.uint8)
-        if opt.Hnet_inchannel == 1:
-            random_bits = torch.from_numpy(random_bits).float().to(opt.device)
-            random_bits = random_bits.unsqueeze(dim=0)
-        else:
-            random_bits = np.stack(arrays=(random_bits, random_bits, random_bits), axis=0)
-            random_bits = torch.from_numpy(random_bits).float().to(opt.device)
-            
-        random_bits_img = tensor2img(random_bits.clone())
-        random_bits_img.save(os.path.join(opt.experiment_dir, 'secret_img_ori.png'))
-
-        secret_img = random_bits.unsqueeze(dim=0)
-
         cover_dataset = ImageDataset(root=opt.origin_dir, transforms=transforms_cover)
+
+        if opt.gen_mode == 'white':
+            # Secret Image
+            random_bits = np.ones((opt.imageSize, opt.imageSize), dtype=np.uint8)
+            if opt.Hnet_inchannel == 1:
+                random_bits = torch.from_numpy(random_bits).float().to(opt.device)
+                random_bits = random_bits.unsqueeze(dim=0)
+            else:
+                random_bits = np.stack(arrays=(random_bits, random_bits, random_bits), axis=0)
+                random_bits = torch.from_numpy(random_bits).float().to(opt.device)
+                
+            #random_bits_img = tensor2img(random_bits.clone())
+            #random_bits_img.save(os.path.join(opt.experiment_dir, 'secret_img_ori.png'))
+
+            secret_img = random_bits.unsqueeze(dim=0)
+        elif opt.gen_mode == 'random':
+            assert opt.secret_dir != None, 'Please assign directory of secret images if chose random generation mode'
+            secret_dataset = ImageDataset(root=opt.secret_dir, transforms=transforms_secret)
+        elif opt.gen_mode == 'same':
+            secret_dataset = cover_dataset
+        else:
+            print('[*]Please chose the corret generation mode from [white | random | same]')
 
         Hnet = UnetGenerator(input_nc=opt.Hnet_inchannel, output_nc=opt.Hnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid())
         Hnet.to(opt.device)
@@ -267,16 +286,12 @@ def main():
 
         container_dataset = ImageDataset(root=opt.container_dir, transforms=transforms_container)
 
-        Anet = Adversary(input_nc=opt.Hnet_outchannel, output_nc=opt.Rnet_inchannel)
-        Anet.to(opt.device)
-
         Rnet = RevealNet(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid())
         Rnet.to(opt.device)
 
         # Load Pre-trained mode
         if opt.checkpoint != "":
             checkpoint = torch.load(opt.checkpoint)
-            Anet.load_state_dict(checkpoint['A_state_dict'], strict=True)
             Rnet.load_state_dict(checkpoint['R_state_dict'], strict=True)
 
     # Print networks
@@ -345,6 +360,7 @@ def main():
             save_checkpoint(stat_dict, is_best)
 
         writer.close()
+
     elif opt.mode == 'generate':
         cover_loader = DataLoader(
             cover_dataset, 
@@ -352,7 +368,25 @@ def main():
             shuffle=False, 
             num_workers=int(opt.workers)
         )
-        generate(dataset=cover_dataset, cov_loader=cover_loader, Hnet=Hnet)
+        if opt.gen_mode == 'white':
+            generate(dataset=cover_dataset, cov_loader=cover_loader, secret_image=secret_img, Hnet=Hnet)
+        elif opt.gen_mode == 'random':
+            secret_loader = DataLoader(
+                secret_dataset, 
+                batch_size=opt.bs_generate,
+                shuffle=True, 
+                num_workers=int(opt.workers)
+            )
+            generate(dataset=cover_dataset, cov_loader=cover_loader, secret_image=secret_loader, Hnet=Hnet)
+        elif opt.gen_mode == 'same':
+            secret_loader = DataLoader(
+                secret_dataset, 
+                batch_size=opt.bs_generate,
+                shuffle=False, 
+                num_workers=int(opt.workers)
+            )
+            generate(dataset=cover_dataset, cov_loader=cover_loader, secret_image=secret_loader, Hnet=Hnet)
+
     elif opt.mode == 'extract':
         container_loader = DataLoader(
             container_dataset, 
@@ -361,7 +395,6 @@ def main():
             num_workers=int(opt.workers)
         )
         extract(dataset=container_dataset, con_loader=container_loader, Rnet=Rnet)
-        #extract(dataset=container_dataset, con_loader=container_loader, Anet=Anet, Rnet=Rnet)
 
 
 def save_checkpoint(state, is_best):
@@ -481,7 +514,6 @@ def train(train_loader, epoch, Anet, Hnet, Rnet, criterion):
     Hlosses = AverageMeter()  
     Rlosses = AverageMeter() 
     SumLosses = AverageMeter()
-    Adiff = AverageMeter()
     Hdiff = AverageMeter()
     Rdiff = AverageMeter()
 
@@ -565,7 +597,6 @@ def validation(val_loader, epoch, Anet, Hnet, Rnet, criterion):
     Alosses = AverageMeter()
     Hlosses = AverageMeter()
     Rlosses = AverageMeter()  
-    Adiff = AverageMeter()
     Hdiff = AverageMeter()
     Rdiff = AverageMeter()
 
@@ -615,40 +646,69 @@ def validation(val_loader, epoch, Anet, Hnet, Rnet, criterion):
     return Alosses.avg, Hlosses.avg, Rlosses.avg, Hdiff.avg, Rdiff.avg
 
 
-def generate(dataset, cov_loader, Hnet):
+def generate(dataset, cov_loader, secret_image, Hnet):
     Hnet.eval()
 
     idx = 0
-    for cover_batch in tqdm(cov_loader):
-        cover_batch = cover_batch.to(opt.device)
-        batch_size_cover, _, _, _ = cover_batch.size()
+    if opt.mode == 'white':
+        for cover_batch in tqdm(cov_loader):
+            cover_batch = cover_batch.to(opt.device)
+            batch_size_cover, _, _, _ = cover_batch.size()
 
-        H_input = secret_img.repeat(batch_size_cover, 1, 1, 1)
+            H_input = secret_image.repeat(batch_size_cover, 1, 1, 1)
 
-        pro_secret_batch = Hnet(H_input) * opt.Hnet_factor
+            pro_secret_batch = Hnet(H_input) * opt.Hnet_factor
 
-        container_batch = pro_secret_batch + cover_batch
+            container_batch = pro_secret_batch + cover_batch
 
-        for i, container in enumerate(container_batch):
-            pro_secret_img = tensor2img(pro_secret_batch[i])
-            cover_img = tensor2img(cover_batch[i])
-            container_img = tensor2img(container)
+            for i, container in enumerate(container_batch):
+                secret_img = tensor2img(secret_image.clone())
+                pro_secret_img = tensor2img(pro_secret_batch[i])
+                cover_img = tensor2img(cover_batch[i])
+                container_img = tensor2img(container)
 
-            img_name = os.path.basename(dataset.image_paths[idx]).split('.')[0]
+                img_name = os.path.basename(dataset.image_paths[idx]).split('.')[0]
 
-            pro_secret_img.save(os.path.join(opt.secret_dir, '{}.png'.format(img_name)))
-            cover_img.save(os.path.join(opt.cover_dir, '{}.png'.format(img_name)))
+                secret_img.save(os.path.join(opt.ori_secret_dir, '{}.png'.format(img_name)))
+                pro_secret_img.save(os.path.join(opt.pro_secret_dir, '{}.png'.format(img_name)))
+                cover_img.save(os.path.join(opt.cover_dir, '{}.png'.format(img_name)))
 
-            if opt.compression == 'Yes':
-                container_img.save(os.path.join(opt.container_dir, '{}.jpg'.format(img_name)), quality=opt.com_quality, optimize=True, subsampling=0)
-            else:
-                container_img.save(os.path.join(opt.container_dir, '{}.png'.format(img_name)))
+                if opt.compression == 'Yes':
+                    container_img.save(os.path.join(opt.container_dir, '{}.jpg'.format(img_name)), quality=opt.com_quality, optimize=True, subsampling=0)
+                else:
+                    container_img.save(os.path.join(opt.container_dir, '{}.png'.format(img_name)))
 
-            idx += 1
+                idx += 1
+    else:
+        for (cover_batch, secret_batch) in tqdm(zip(cov_loader, secret_image)):
+            cover_batch = cover_batch.to(opt.device)
+            secret_batch = secret_batch.to(opt.device)
+
+            pro_secret_batch = Hnet(secret_batch) #* opt.Hnet_factor
+            
+            container_batch = pro_secret_batch + cover_batch
+
+            for i, container in enumerate(container_batch):
+                secret_img = tensor2img(secret_batch[i])
+                pro_secret_img = tensor2img(pro_secret_batch[i])
+                cover_img = tensor2img(cover_batch[i])
+                container_img = tensor2img(container)
+
+                img_name = os.path.basename(dataset.image_paths[idx]).split('.')[0]
+
+                secret_img.save(os.path.join(opt.ori_secret_dir, '{}.png'.format(img_name)))
+                pro_secret_img.save(os.path.join(opt.pro_secret_dir, '{}.png'.format(img_name)))
+                cover_img.save(os.path.join(opt.cover_dir, '{}.png'.format(img_name)))
+
+                if opt.compression == 'Yes':
+                    container_img.save(os.path.join(opt.container_dir, '{}.jpg'.format(img_name)), quality=opt.com_quality, optimize=True, subsampling=0)
+                else:
+                    container_img.save(os.path.join(opt.container_dir, '{}.png'.format(img_name)))
+
+                idx += 1        
 
 
 def extract(dataset, con_loader, Rnet):
-#def extract(dataset, con_loader, Anet, Rnet):
     Rnet.eval()
 
     idx = 0
@@ -658,30 +718,30 @@ def extract(dataset, con_loader, Rnet):
 
         rev_secret_bath = Rnet(container_batch)
 
-        #adversarial_img = Anet(container_batch)
-        #rev_secret_bath = Rnet(adversarial_img)
-
         for _, rev_secret in enumerate(rev_secret_bath):
             img_name = os.path.basename(dataset.image_paths[idx])
 
-            detection_img = (rev_secret < opt.threshold).type(torch.int8)
+            mask_detect = (rev_secret * 255 < opt.threshold).type(torch.int8)
+            
+            mask_detect = tensor2array(mask_detect)
+            mask_gray = cv2.cvtColor(mask_detect, cv2.COLOR_RGB2GRAY)
 
-            img_ori = tensor2array(detection_img)
-            img_gray = cv2.cvtColor(img_ori, cv2.COLOR_RGB2GRAY)
+            _, mask_binary = cv2.threshold(src=mask_gray, thresh=0, maxval=255, type=cv2.THRESH_BINARY) 
 
-            _, img_binary = cv2.threshold(src=img_gray, thresh=0, maxval=255, type=cv2.THRESH_BINARY) 
+            contours, _ = cv2.findContours(mask_binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
 
-            contours, _ = cv2.findContours(img_binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-
-            result = np.zeros_like(img_gray)
+            mask_result = np.zeros_like(mask_gray)
             try:
                 for contour in contours:
-                    cv2.drawContours(image=result, contours=[contour], contourIdx=-1, color=(255,255,255), thickness=-1)
+                    cv2.drawContours(image=mask_result, contours=[contour], contourIdx=-1, color=(255,255,255), thickness=-1)
             except:
                 None
 
-            img_result = Image.fromarray(result.astype('uint8'))
-            img_result.save(os.path.join(opt.rev_secret_dir, img_name))
+            rev_secret_img = tensor2img(rev_secret)
+            rev_secret_img.save(os.path.join(opt.rev_secret_dir, img_name))
+            
+            rev_mask_img = Image.fromarray(mask_result.astype('uint8'))
+            rev_mask_img.save(os.path.join(opt.rev_mask_dir, img_name))
 
             idx += 1
 
