@@ -49,7 +49,8 @@ parser.add_argument('--checkpoint', default='', help='checkpoint address')
 parser.add_argument('--logFrequency', type=int, default=10, help='the frequency of print the log on the console')
 parser.add_argument('--resultPicFrequency', type=int, default=100, help='the frequency of save the resultPic')
 parser.add_argument('--norm', default='instance', help='batch or instance')
-parser.add_argument('--loss', default='l2', help='l1 or l2')
+parser.add_argument('--mask_loss', default='BCE', help='CE or BCE')
+parser.add_argument('--image_loss', default='l2', help='l1 or l2')
 parser.add_argument('--Hnet_inchannel', type=int, default=3, help='1: gray; 3: color')
 parser.add_argument('--Hnet_outchannel', type=int, default=3, help='1: gray; 3: color')
 parser.add_argument('--Rnet_inchannel', type=int, default=3, help='1: gray; 3: color')
@@ -112,9 +113,7 @@ def main():
     cur_time = time.strftime('%Y-%m-%d_H%H-%M-%S', time.localtime())
     assert opt.Hnet_inchannel == opt.Rnet_outchannel, 'Please make sure the channel of input secret image equal to the extracted secret image!'
     if opt.mode == 'train':
-        Hnet_comment = 'Hnet_in{}out{}'.format(opt.Hnet_inchannel, opt.Hnet_outchannel)
-        Rnet_comment = 'Rnet_in{}out{}'.format(opt.Rnet_inchannel, opt.Rnet_outchannel)
-        opt.experiment_dir = os.path.join(opt.output_dir, cur_time+"_"+str(opt.imageSize)+"_"+opt.norm+"_"+opt.loss+"_"+str(opt.beta)+"_"+Hnet_comment+"_"+Rnet_comment+"_"+str(opt.Hnet_factor))
+        opt.experiment_dir = os.path.join(opt.output_dir, cur_time+"_"+str(opt.imageSize)+"_"+opt.norm+"_"+opt.mask_loss+"_"+opt.image_loss+"_"+str(opt.beta)+"_"+str(opt.Hnet_factor))
         print("[*]Saving the experiment results at {}".format(opt.experiment_dir))
 
         opt.outckpts = os.path.join(opt.experiment_dir, "CheckPoints")
@@ -236,12 +235,19 @@ def main():
             Rnet.load_state_dict(checkpoint['R_state_dict'], strict=True)
 
         # Loss and Metric
-        if opt.loss == 'l1':
-            criterion = nn.L1Loss().cuda()
-        elif opt.loss == 'l2':
-            criterion = nn.MSELoss().cuda()
+        if opt.mask_loss == 'CE':
+            mask_criterion = nn.CrossEntropyLoss().cuda()
+        elif opt.mask_loss == 'BCE':
+            mask_criterion = nn.BCELoss().cuda()
         else:
-            raise ValueError("Invalid Loss Function. Must be one of [l1, l2]")
+            raise ValueError("Invalid Image Loss Function. Must be one of [l1, l2]")
+
+        if opt.image_loss == 'l1':
+            image_criterion = nn.L1Loss().cuda()
+        elif opt.image_loss == 'l2':
+            image_criterion = nn.MSELoss().cuda()
+        else:
+            raise ValueError("Invalid Image Loss Function. Must be one of [l1, l2]")
 
     elif opt.mode == 'generate':
         cover_dataset = ImageDataset(root=opt.origin_dir, transforms=transforms_cover)
@@ -269,7 +275,8 @@ def main():
 
         # Load Pre-trained mode
         if opt.checkpoint != "":
-            checkpoint = torch.load(opt.checkpoint)
+            print('[*]Loading pre-trained model from: {}'.format(opt.checkpoint))
+            checkpoint = torch.load(opt.checkpoint, map_location=opt.device)
             Hnet.load_state_dict(checkpoint['H_state_dict'], strict=True)
                     
     elif opt.mode == 'extract':
@@ -288,15 +295,20 @@ def main():
         container_dataset = ImageDataset(root=opt.container_dir, transforms=transforms_container)
 
         Enet = ExtractNet(input_nc=3, output_nc=3, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
-        Dnet = ResNet18(in_channels=3, output_function=nn.Sigmoid()).to(opt.device)
+        Dnet = ResNet18(in_channels=3, out_channels=1, output_function=nn.Sigmoid()).to(opt.device)
         Rnet = ReconstructNet(input_nc=3, output_nc=3, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
 
         # Load Pre-trained mode
         if opt.checkpoint != "":
-            checkpoint = torch.load(opt.checkpoint)
+            print('[*]Loading pre-trained model from: {}'.format(opt.checkpoint))
+            checkpoint = torch.load(opt.checkpoint, map_location=opt.device)
             Enet.load_state_dict(checkpoint['E_state_dict'], strict=True)
             Dnet.load_state_dict(checkpoint['D_state_dict'], strict=True)
             Rnet.load_state_dict(checkpoint['R_state_dict'], strict=True)
+
+        Dnet.eval()
+        Enet.eval()
+        Rnet.eval()
 
     # Print networks
     #print_network(Hnet)
@@ -335,11 +347,11 @@ def main():
             val_loader = zip(secret_loader, val_loader_cover)
 
             ################## train ##################
-            train(train_loader, epoch, Dnet=Dnet, Enet=Enet, Hnet=Hnet, Rnet=Rnet, criterion=criterion)
+            train(train_loader, epoch, Dnet=Dnet, Enet=Enet, Hnet=Hnet, Rnet=Rnet, mask_criterion=mask_criterion, image_criterion=image_criterion)
 
             ################## validation  ##################
             with torch.no_grad():
-                val_dloss, val_eloss, val_hloss, val_rloss, val_hdiff, val_ddiff, val_rdiff = validation(val_loader, epoch, Dnet=Dnet, Enet=Enet, Hnet=Hnet, Rnet=Rnet, criterion=criterion)
+                val_dloss, val_eloss, val_hloss, val_rloss, val_hdiff, val_ddiff, val_rdiff = validation(val_loader, epoch, Dnet=Dnet, Enet=Enet, Hnet=Hnet, Rnet=Rnet, mask_criterion=mask_criterion, image_criterion=image_criterion)
 
             ################## adjust learning rate ##################
             scheduler.step(val_rloss) # 注意！这里只用 R 网络的 loss 进行 learning rate 的更新
@@ -442,8 +454,9 @@ def image_distorion(image):
         trans = transforms.Compose([transforms.ToTensor()])
         mask_ori = trans(mask_ori).to(opt.device)
 
-        mask_dis = mask_ori * torch.rand_like(mask_ori)
-        img_dis = img_ori * mask_dis + img_ori * (torch.ones_like(mask_ori) - mask_ori)
+        #mask_dis = mask_ori * torch.rand_like(mask_ori)
+        #img_dis = img_ori * mask_dis + img_ori * (torch.ones_like(mask_ori) - mask_ori)
+        img_dis = img_ori * (torch.ones_like(mask_ori) - mask_ori)
 
         image_dis[idx] = img_dis
         mask[idx] = mask_ori
@@ -451,7 +464,28 @@ def image_distorion(image):
     return image_dis, mask
 
 
-def forward_pass(secret, cover, Dnet, Enet, Hnet, Rnet, criterion):
+def random_mask(image):
+    batch_size, img_channel, img_hight, img_width = image.size()
+    # The keeped pixel value is 0, the removed pixel value is 1
+    # The original pixel is 0, the manipulated pixel is 1
+    #masks = (torch.rand((batch_size, 1, img_hight, img_width)) > 0.5).int().to(opt.device)
+
+    block_size = 32
+    block_number = img_hight // block_size
+
+    block_mask = (torch.rand((batch_size,1,block_size,block_size)) > 0.5).float()
+
+    masks = torch.repeat_interleave(input=block_mask, repeats=block_number, dim=2)
+
+    masks = torch.repeat_interleave(input=masks, repeats=block_number, dim=3).to(opt.device)
+
+    image_masked = image * (torch.ones_like(masks) - masks)
+    image_masked = image_masked.to(opt.device)
+
+    return image_masked, masks
+
+
+def forward_pass(secret, cover, Dnet, Enet, Hnet, Rnet, mask_criterion, image_criterion):
     secret = secret.to(opt.device)
     cover = cover.to(opt.device)
 
@@ -459,8 +493,9 @@ def forward_pass(secret, cover, Dnet, Enet, Hnet, Rnet, criterion):
     
     container = watermark + cover
 
-    tampered_image, tampered_mask = image_distorion(container)  # tampered_image: c=3, tampered_mask: c=1
-    tampered_mask = tampered_mask.to(opt.device)
+    #tampered_image, tampered_mask = image_distorion(container)  # tampered_image: c=3, tampered_mask: c=1
+    #tampered_mask = tampered_mask.to(opt.device)
+    tampered_image, tampered_mask = random_mask(container)
 
     tam_watermark = watermark * (torch.ones_like(tampered_mask) - tampered_mask) 
     tam_secret = secret * (torch.ones_like(tampered_mask) - tampered_mask) 
@@ -470,10 +505,11 @@ def forward_pass(secret, cover, Dnet, Enet, Hnet, Rnet, criterion):
     rec_mask = Dnet(rev_watermark)
     rec_secret = Rnet(rev_watermark)
 
-    errH = criterion(container, cover)  # Hiding net
-    errE = criterion(rev_watermark, tam_watermark)  # Extract net
-    errD = criterion(rec_mask, tampered_mask)  # Detect net
-    errR = criterion(rec_secret, tam_secret)  # Reconstruct net
+    errH = image_criterion(container, cover)  # Hiding net
+    errE = image_criterion(rev_watermark, tam_watermark)  # Extract net
+    errR = image_criterion(rec_secret, tam_secret)  # Reconstruct net
+
+    errD = mask_criterion(rec_mask, tampered_mask)  # Detect net
 
     diffH = (container-cover).abs().mean()*255
     diffD = (rec_mask-tampered_mask).abs().mean()*255
@@ -520,7 +556,7 @@ def adversarial_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion):
     return errA
 
 
-def train(train_loader, epoch, Dnet, Enet, Hnet, Rnet, criterion):
+def train(train_loader, epoch, Dnet, Enet, Hnet, Rnet, mask_criterion, image_criterion):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     Dlosses = AverageMeter()  
@@ -543,7 +579,7 @@ def train(train_loader, epoch, Dnet, Enet, Hnet, Rnet, criterion):
         Enet.train()
         Hnet.train()
         Rnet.train()
-        image_dict, data_dict = forward_pass(secret_img, cover_img, Dnet, Enet, Hnet, Rnet, criterion)
+        image_dict, data_dict = forward_pass(secret_img, cover_img, Dnet, Enet, Hnet, Rnet, mask_criterion, image_criterion)
 
         err_sum = data_dict['errD'] + data_dict['errE'] + data_dict['errH'] + data_dict['errR']
         optimizer_DEHR.zero_grad()
@@ -598,7 +634,7 @@ def train(train_loader, epoch, Dnet, Enet, Hnet, Rnet, criterion):
     writer.add_scalar('train/R_diff', Rdiff.avg, epoch)
 
 
-def validation(val_loader, epoch, Dnet, Enet, Hnet, Rnet, criterion):
+def validation(val_loader, epoch, Dnet, Enet, Hnet, Rnet, mask_criterion, image_criterion):
     print("#################################################### validation begin ####################################################")    
     batch_time = AverageMeter()
     Dlosses = AverageMeter()  
@@ -618,7 +654,7 @@ def validation(val_loader, epoch, Dnet, Enet, Hnet, Rnet, criterion):
 
     for i, (secret_img, cover_img) in enumerate(val_loader):
 
-        image_dict, data_dict = forward_pass(secret_img, cover_img, Dnet, Enet, Hnet, Rnet, criterion)
+        image_dict, data_dict = forward_pass(secret_img, cover_img, Dnet, Enet, Hnet, Rnet, mask_criterion, image_criterion)
 
         Dlosses.update(data_dict['errD'].data, opt.bs_train)  # D loss
         Elosses.update(data_dict['errE'].data, opt.bs_train)  # E loss
@@ -661,8 +697,6 @@ def validation(val_loader, epoch, Dnet, Enet, Hnet, Rnet, criterion):
 
 
 def generate(dataset, cov_loader, secret_image, Hnet):
-    Hnet.eval()
-
     idx = 0
     if opt.gen_mode == 'white':
         for cover_batch in tqdm(cov_loader):
@@ -723,10 +757,6 @@ def generate(dataset, cov_loader, secret_image, Hnet):
 
 
 def extract(dataset, con_loader, Dnet, Enet, Rnet):
-    Dnet.eval()
-    Enet.eval()
-    Rnet.eval()
-
     idx = 0
 
     for container_batch in tqdm(con_loader):
@@ -839,7 +869,7 @@ def save_result_pic(dis_num, image_dict, epoch, i, save_path):
 
         fig.add_subplot(gs[img_idx, 6])
         tam_mask = tensor2img(image_dict['tampered_mask'][img_idx])
-        plt.imshow(tam_mask)
+        plt.imshow(tam_mask, cmap='gray')
         plt.title("Tampered Mask")
 
         fig.add_subplot(gs[img_idx, 7])
@@ -854,12 +884,12 @@ def save_result_pic(dis_num, image_dict, epoch, i, save_path):
 
         fig.add_subplot(gs[img_idx, 9])
         rec_mask = tensor2img(image_dict['rec_mask'][img_idx])
-        plt.imshow(rec_mask)
+        plt.imshow(rec_mask, cmap='gray')
         plt.title("Rec_Mask")
 
         fig.add_subplot(gs[img_idx, 10])
         maskgap_img = tensor2img(mask_gap[img_idx])
-        plt.imshow(maskgap_img)
+        plt.imshow(maskgap_img, cmap='gray')
         plt.title("Masked Gap")
 
         fig.add_subplot(gs[img_idx, 11])
