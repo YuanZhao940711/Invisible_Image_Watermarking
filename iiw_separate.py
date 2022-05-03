@@ -697,6 +697,8 @@ def validation(val_loader, epoch, Dnet, Enet, Hnet, Rnet, mask_criterion, image_
 
 
 def generate(dataset, cov_loader, secret_image, Hnet):
+    Hnet.eval()
+
     idx = 0
     if opt.gen_mode == 'white':
         for cover_batch in tqdm(cov_loader):
@@ -757,6 +759,10 @@ def generate(dataset, cov_loader, secret_image, Hnet):
 
 
 def extract(dataset, con_loader, Dnet, Enet, Rnet):
+    Dnet.eval()
+    Enet.eval()
+    Rnet.eval()
+
     idx = 0
 
     for container_batch in tqdm(con_loader):
