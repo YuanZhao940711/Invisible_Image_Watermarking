@@ -325,7 +325,8 @@ def main():
             train(train_loader, epoch, Hnet=Hnet, Rnet=Rnet, criterion=criterion)
 
             ################## validation  ##################
-            val_hloss, val_rloss, val_hdiff, val_rdiff = validation(val_loader, epoch, Hnet=Hnet, Rnet=Rnet, criterion=criterion)
+            with torch.no_grad():
+                val_hloss, val_rloss, val_hdiff, val_rdiff = validation(val_loader, epoch, Hnet=Hnet, Rnet=Rnet, criterion=criterion)
 
             ################## adjust learning rate ##################
             scheduler.step(val_rloss) # 注意！这里只用 R 网络的 loss 进行 learning rate 的更新
@@ -569,7 +570,6 @@ def train(train_loader, epoch, Hnet, Rnet, criterion):
     print_log(epoch_log, logPath)
 
     writer.add_scalar("lr/lr", optimizer.param_groups[0]['lr'], epoch)
-    writer.add_scalar("lr/beta", opt.beta, epoch)
     writer.add_scalar('train/H_loss', Hlosses.avg, epoch)
     writer.add_scalar('train/R_loss', Rlosses.avg, epoch)
     writer.add_scalar('train/Sum_loss', SumLosses.avg, epoch)
