@@ -36,6 +36,7 @@ parser.add_argument('--lr', type=float, default=0.001, help='learning rate, defa
 parser.add_argument('--beta_adam', type=float, default=0.5, help='beta_adam for adam. default=0.5')
 parser.add_argument('--Hnet', default='', help="path to Hidingnet (to continue training)")
 parser.add_argument('--Rnet', default='', help="path to Revealnet (to continue training)")
+parser.add_argument('--Rnet_beta', type=float, default=0.75, help='hyper parameter of Hnet factor')
 parser.add_argument('--Hnet_factor', type=float, default=1, help='hyper parameter of Hnet factor')
 parser.add_argument('--checkpoint', default='', help='checkpoint address')
 
@@ -53,18 +54,17 @@ parser.add_argument('--max_train_iters', type=int, default=2000)
 parser.add_argument('--bs_train', type=int, default=16, help='training batch size')
 parser.add_argument('--bs_generate', type=int, default=16, help='generation batch size')
 parser.add_argument('--bs_extract', type=int, default=16, help='extraction batch size')
+
 parser.add_argument('--output_dir', default='', help='directory of outputing results')
-parser.add_argument('--val_dir', type=str, default='', help='directory of validation images')
-parser.add_argument('--train_dir', type=str, default='', help='directory of training images')
-parser.add_argument('--secret_dir', type=str, default='', help='directory of secret images for training')
+parser.add_argument('--val_dir', type=str, default='', help='directory of validation images in training process')
+parser.add_argument('--train_dir', type=str, default='', help='directory of training images in training process')
+parser.add_argument('--cover_dir', type=str, default='', help='directory of cover images')
+parser.add_argument('--container_dir', type=str, default='', help='directory of container images')
+parser.add_argument('--secret_dir', type=str, default='', help='directory of secret images')
 
 parser.add_argument('--max_epoch', type=int, default=50, help='number of epochs to train for')
 parser.add_argument('--dis_num', type=int, default=5, help='number of example image for visualization')
 parser.add_argument('--threshold', type=float, default=0.9, help='value to decide whether a pixel is tampered')
-
-parser.add_argument('--origin_dir', type=str, default='', help='directory of original images')
-parser.add_argument('--secret_path', type=str, default='', help='path of origin secret image')
-parser.add_argument('--container_dir', type=str, default='', help='directory of container images')
 
 parser.add_argument('--gen_mode', type=str, default='white', help='white | random | same')
 
@@ -136,16 +136,16 @@ def main():
         print("[*]Saving the generation results at {}".format(opt.experiment_dir))
 
         opt.loaded_secret_dir = os.path.join(opt.experiment_dir, "loaded_secret")
-        print("[*]Generating secret images at: {}".format(opt.loaded_secret_dir))
+        print("[*]Generating loaded secret images at: {}".format(opt.loaded_secret_dir))
         os.makedirs(opt.loaded_secret_dir, exist_ok=True)
 
         opt.watermark_dir = os.path.join(opt.experiment_dir, "watermark")
         print("[*]Generating processed secret images at: {}".format(opt.watermark_dir))
         os.makedirs(opt.watermark_dir, exist_ok=True)
             
-        opt.cover_dir = os.path.join(opt.experiment_dir, "cover")
-        print("[*]Generating cover images at: {}".format(opt.cover_dir))
-        os.makedirs(opt.cover_dir, exist_ok=True)
+        opt.loaded_cover_dir = os.path.join(opt.experiment_dir, "cover")
+        print("[*]Generating loaded cover images at: {}".format(opt.loaded_cover_dir))
+        os.makedirs(opt.loaded_cover_dir, exist_ok=True)
             
         opt.container_dir = os.path.join(opt.experiment_dir, 'container')
         print("[*]Generating container images at: {}".format(opt.container_dir))
@@ -153,18 +153,11 @@ def main():
         
     elif opt.mode == 'extract':
         opt.experiment_dir = opt.output_dir
+        print("[*]Saving the extracting results at {}".format(opt.experiment_dir))
 
-        opt.rev_watermark_dir = os.path.join(opt.experiment_dir, "rev_watermark")
-        print("[*]Generating retrieved watermark at: {}".format(opt.rev_watermark_dir))
-        os.makedirs(opt.rev_watermark_dir, exist_ok=True)
-
-        opt.rec_mask_dir = os.path.join(opt.experiment_dir, "rec_mask")
-        print("[*]Generating reconstruct masks at: {}".format(opt.rec_mask_dir))
-        os.makedirs(opt.rec_mask_dir, exist_ok=True)
-
-        opt.rec_secret_dir = os.path.join(opt.experiment_dir, "rec_secret")
-        print("[*]Generating reconstruct secret images at: {}".format(opt.rec_secret_dir))
-        os.makedirs(opt.rec_secret_dir, exist_ok=True)
+        opt.rev_secret_dir = os.path.join(opt.experiment_dir, "rev_secret")
+        print("[*]Generating retrieved secret images at: {}".format(opt.rev_secret_dir))
+        os.makedirs(opt.rev_secret_dir, exist_ok=True)
 
     ################## Datasets and Networks ##################
     if opt.norm == 'instance':
@@ -211,18 +204,20 @@ def main():
             root = opt.val_dir,
             transforms = transforms_cover)
 
-        Hnet = UnetGenerator(input_nc=opt.Hnet_inchannel, output_nc=opt.Hnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid())
-        Rnet = RevealNet(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid())
+        Hnet = UnetGenerator(input_nc=opt.Hnet_inchannel, output_nc=opt.Hnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+        Rnet = RevealNet(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
 
         # Load Pre-trained mode
         if opt.checkpoint != "":
+            print('[*]Loading pre-trained model from: {}'.format(opt.checkpoint))
             checkpoint = torch.load(opt.checkpoint)
             Hnet.load_state_dict(checkpoint['H_state_dict'], strict=True)
             Rnet.load_state_dict(checkpoint['R_state_dict'], strict=True)
         else:
             # Using Kaiming Normalization to initialize network's parameters
-            Hnet.apply(weights_init).to(opt.device)
-            Rnet.apply(weights_init).to(opt.device)
+            print('[*]Training from scratch')
+            Hnet.apply(weights_init)
+            Rnet.apply(weights_init)
 
         # Loss and Metric
         if opt.loss == 'l1':
@@ -233,7 +228,7 @@ def main():
             raise ValueError("Invalid Loss Function. Must be one of [l1, l2]")
 
     elif opt.mode == 'generate':
-        cover_dataset = ImageDataset(root=opt.origin_dir, transforms=transforms_cover)
+        cover_dataset = ImageDataset(root=opt.cover_dir, transforms=transforms_cover)
 
         if opt.gen_mode == 'white':
             # Secret Image
@@ -254,7 +249,7 @@ def main():
         else:
             print('[*]Please chose the corret generation mode from [white | random | same]')
 
-        Hnet = UnetGenerator(input_nc=opt.Hnet_inchannel, output_nc=opt.Hnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid())
+        Hnet = UnetGenerator(input_nc=opt.Hnet_inchannel, output_nc=opt.Hnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
 
         # Load Pre-trained mode
         assert opt.checkpoint != None, 'Please assign directory of pre-trained mode'
@@ -537,7 +532,7 @@ def train(train_loader, epoch, Hnet, Rnet, criterion):
         Rdiff.update(data_dict['diffR'].data, opt.bs_train)
 
         # Loss, backprop, and optimization step
-        err_sum = data_dict['errH'] + data_dict['errR']
+        err_sum = data_dict['errH'] + data_dict['errR'] * opt.Rnet_beta
         optimizer.zero_grad()
         err_sum.backward()
         optimizer.step()
@@ -653,12 +648,8 @@ def generate(dataset, cov_loader, secret_image, Hnet):
 
                 secret_img.save(os.path.join(opt.loaded_secret_dir, '{}.png'.format(img_name)))
                 watermark_img.save(os.path.join(opt.watermark_dir, '{}.png'.format(img_name)))
-                cover_img.save(os.path.join(opt.cover_dir, '{}.png'.format(img_name)))
-
-                if opt.compression == 'Yes':
-                    container_img.save(os.path.join(opt.container_dir, '{}.jpg'.format(img_name)), quality=opt.com_quality, optimize=True, subsampling=0)
-                else:
-                    container_img.save(os.path.join(opt.container_dir, '{}.png'.format(img_name)))
+                cover_img.save(os.path.join(opt.loaded_cover_dir, '{}.png'.format(img_name)))
+                container_img.save(os.path.join(opt.container_dir, '{}.png'.format(img_name)))
 
                 idx += 1
     else:
@@ -681,11 +672,7 @@ def generate(dataset, cov_loader, secret_image, Hnet):
                 secret_img.save(os.path.join(opt.loaded_secret_dir, '{}.png'.format(img_name)))
                 watermark_img.save(os.path.join(opt.watermark_dir, '{}.png'.format(img_name)))
                 cover_img.save(os.path.join(opt.cover_dir, '{}.png'.format(img_name)))
-
-                if opt.compression == 'Yes':
-                    container_img.save(os.path.join(opt.container_dir, '{}.jpg'.format(img_name)), quality=opt.com_quality, optimize=True, subsampling=0)
-                else:
-                    container_img.save(os.path.join(opt.container_dir, '{}.png'.format(img_name)))
+                container_img.save(os.path.join(opt.container_dir, '{}.png'.format(img_name)))
 
                 idx += 1       
 
