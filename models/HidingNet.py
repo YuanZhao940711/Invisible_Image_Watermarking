@@ -29,9 +29,9 @@ class deconv4x4(nn.Module):
 
 
 
-class HidingNet(nn.Module):
+class UNetDeep(nn.Module):
     def __init__(self, input_nc, output_nc, norm_layer, output_function):
-        super(HidingNet, self).__init__()
+        super(UNetDeep, self).__init__()
         self.conv1 = conv4x4(c_in=input_nc, c_out=32, norm=norm_layer)
         self.conv2 = conv4x4(c_in=32, c_out=64, norm=norm_layer)
         self.conv3 = conv4x4(c_in=64, c_out=128, norm=norm_layer)
@@ -70,3 +70,35 @@ class HidingNet(nn.Module):
         up_feat7 = self.deconv6(input=up_feat6, feat=down_feat1) # input(128x64x64->32x128x128) + feat(32x128x128) = up_feat7(64x128x128)
 
         return self.output_layer(up_feat7) # up_feat7(64x128x128) -> x(3x256x256)
+
+
+
+class UNetShallow(nn.Module):
+    def __init__(self, input_nc, output_nc, norm_layer, output_function):
+        super(UNetShallow, self).__init__()
+        self.conv1 = conv4x4(c_in=input_nc, c_out=32, norm=norm_layer)
+        self.conv2 = conv4x4(c_in=32, c_out=64, norm=norm_layer)
+        self.conv3 = conv4x4(c_in=64, c_out=128, norm=norm_layer)
+        self.conv4 = conv4x4(c_in=128, c_out=128, norm=norm_layer)
+
+        self.deconv1 = deconv4x4(c_in=128, c_out=128, norm=norm_layer)
+        self.deconv2 = deconv4x4(c_in=256, c_out=64, norm=norm_layer)
+        self.deconv3 = deconv4x4(c_in=128, c_out=32, norm=norm_layer)
+
+        self.output_layer = nn.Sequential(
+            nn.ConvTranspose2d(in_channels=64, out_channels=output_nc, kernel_size=4, stride=2, padding=1),
+            output_function
+        )
+
+    def forward(self, Xt):
+        down_feat1 = self.conv1(Xt) # Xt: 3x256x256 -> down_feat1: 32x128x128
+        down_feat2 = self.conv2(down_feat1) # down_feat2: 64x64x64
+        down_feat3 = self.conv3(down_feat2) # down_feat3: 128x32x32
+
+        up_feat1 = self.conv4(down_feat3) # up_feat1: 128x16x16
+
+        up_feat2 = self.deconv1(input=up_feat1, feat=down_feat3) # input(128x16x16->128x32x32) + feat(128x32x32) = up_feat2(256x32x32)
+        up_feat3 = self.deconv2(input=up_feat2, feat=down_feat2) # input(256x32x32->64x64x64) + feat(64x64x64) = up_feat3(128x64x64)
+        up_feat4 = self.deconv3(input=up_feat3, feat=down_feat1) # input(128x64x64->32x128x128) + feat(32x128x128) = up_feat4(64x128x128)
+
+        return self.output_layer(up_feat4) # up_feat4(64x128x128) -> x(3x256x256)

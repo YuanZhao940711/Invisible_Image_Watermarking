@@ -23,8 +23,8 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from utils.dataset import ImageDataset
-from models.RevealNet import RevealNet
-from models.HidingUNet import UnetGenerator
+from models.RevealNet import FullConvSkip, FullConv, TransConv
+from models.HidingNet import UNetDeep, UNetShallow
 
 
 
@@ -36,6 +36,8 @@ parser.add_argument('--lr', type=float, default=0.001, help='learning rate, defa
 parser.add_argument('--beta_adam', type=float, default=0.5, help='beta_adam for adam. default=0.5')
 parser.add_argument('--Hnet', default='', help="path to Hidingnet (to continue training)")
 parser.add_argument('--Rnet', default='', help="path to Revealnet (to continue training)")
+parser.add_argument('--Hnet_mode', type=str, default='UNetDeep', help='UNetDeep | UNetShallow')
+parser.add_argument('--Rnet_mode', type=str, default='FullConvSkip', help='FullConvSkip | FullConv | TransConv')
 parser.add_argument('--Rnet_beta', type=float, default=0.75, help='hyper parameter of Hnet factor')
 parser.add_argument('--Hnet_factor', type=float, default=1, help='hyper parameter of Hnet factor')
 parser.add_argument('--checkpoint', default='', help='checkpoint address')
@@ -76,10 +78,9 @@ parser.add_argument('--block_ratio', type=float, default=0.5, help='')
 
 # Custom weights initialization called on netG and netD
 def weights_init(m):
-    classname = m.__class__.__name__
-    if classname.find('Conv') != -1:
+    if isinstance(m, nn.Conv2d):
         init.kaiming_normal_(m.weight.data, a=0, mode='fan_out')
-    elif classname.find('BatchNorm') != -1:
+    elif isinstance(m, nn.BatchNorm2d):
         m.weight.data.fill_(1.0) 
         m.bias.data.fill_(0)
 
@@ -107,8 +108,8 @@ def main():
     cur_time = time.strftime('%Y%m%dH%H%M%S', time.localtime())
     assert opt.Hnet_inchannel == opt.Rnet_outchannel, 'Please make sure the channel of input secret image equal to the extracted secret image!'
     if opt.mode == 'train':
-        Hnet_comment = 'HnetIC{}OC{}'.format(opt.Hnet_inchannel, opt.Hnet_outchannel)
-        Rnet_comment = 'RnetIC{}OC{}'.format(opt.Rnet_inchannel, opt.Rnet_outchannel)
+        Hnet_comment = 'Hnet{}IC{}OC{}'.format(opt.Hnet_mode, opt.Hnet_inchannel, opt.Hnet_outchannel)
+        Rnet_comment = 'Rnet{}IC{}OC{}'.format(opt.Rnet_mode, opt.Rnet_inchannel, opt.Rnet_outchannel)
         opt.experiment_dir = os.path.join(opt.output_dir, cur_time+"_"+str(opt.imageSize)+"_"+opt.norm+"_"+opt.loss+"_"+Hnet_comment+"_"+Rnet_comment+"_"+str(opt.Hnet_factor)+"_"+opt.mask_mode)
         print("[*]Saving the experiment results at {}".format(opt.experiment_dir))
 
@@ -204,8 +205,21 @@ def main():
             root = opt.val_dir,
             transforms = transforms_cover)
 
-        Hnet = UnetGenerator(input_nc=opt.Hnet_inchannel, output_nc=opt.Hnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
-        Rnet = RevealNet(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+        if opt.Hnet_mode == 'UNetDeep':
+            Hnet = UNetDeep(input_nc=opt.Hnet_inchannel, output_nc=opt.Hnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+        elif opt.Hnet_mode == 'UNetShallow':
+            Hnet = UNetShallow(input_nc=opt.Hnet_inchannel, output_nc=opt.Hnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+        else:
+            raise ValueError("Invalid Hiding Net Mode. Must be one of [UNetDeep, UNetShallow]")
+
+        if opt.Rnet_mode == 'FullConvSkip':
+            Rnet = FullConvSkip(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+        elif opt.Rnet_mode == 'FullConv':
+            Rnet = FullConv(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+        elif opt.Rnet_mode == 'TransConv':
+            Rnet = TransConv(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+        else:
+            raise ValueError("Invalid Reveal Net Mode. Must be one of [FullConvSkip, FullConv, TransConv]")
 
         # Load Pre-trained mode
         if opt.checkpoint != "":
@@ -221,9 +235,9 @@ def main():
 
         # Loss and Metric
         if opt.loss == 'l1':
-            criterion = nn.L1Loss().cuda()
+            criterion = nn.L1Loss().to(opt.device)
         elif opt.loss == 'l2':
-            criterion = nn.MSELoss().cuda()
+            criterion = nn.MSELoss().to(opt.device)
         else:
             raise ValueError("Invalid Loss Function. Must be one of [l1, l2]")
 
@@ -249,7 +263,12 @@ def main():
         else:
             print('[*]Please chose the corret generation mode from [white | random | same]')
 
-        Hnet = UnetGenerator(input_nc=opt.Hnet_inchannel, output_nc=opt.Hnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+        if opt.Hnet_mode == 'UNetDeep':
+            Hnet = UNetDeep(input_nc=opt.Hnet_inchannel, output_nc=opt.Hnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+        elif opt.Hnet_mode == 'UNetShallow':
+            Hnet = UNetShallow(input_nc=opt.Hnet_inchannel, output_nc=opt.Hnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+        else:
+            raise ValueError("Invalid Hiding Net Mode. Must be one of [UNetDeep, UNetShallow]")
 
         # Load Pre-trained mode
         assert opt.checkpoint != None, 'Please assign directory of pre-trained mode'
@@ -272,7 +291,14 @@ def main():
 
         container_dataset = ImageDataset(root=opt.container_dir, transforms=transforms_container)
 
-        Rnet = RevealNet(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+        if opt.Rnet_mode == 'FullConvSkip':
+            Rnet = FullConvSkip(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+        elif opt.Rnet_mode == 'FullConv':
+            Rnet = FullConv(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+        elif opt.Rnet_mode == 'TransConv':
+            Rnet = TransConv(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+        else:
+            raise ValueError("Invalid Reveal Net Mode. Must be one of [FullConvSkip, FullConv, TransConv]")
 
         # Load Pre-trained mode
         assert opt.checkpoint != None, 'Please assign directory of pre-trained mode'
@@ -350,7 +376,8 @@ def main():
             num_workers=int(opt.workers)
         )
         if opt.gen_mode == 'white':
-            generate(dataset=cover_dataset, cov_loader=cover_loader, secret_image=secret_img, Hnet=Hnet)
+            with torch.no_grad():
+                generate(dataset=cover_dataset, cov_loader=cover_loader, secret_image=secret_img, Hnet=Hnet)
         elif opt.gen_mode == 'random':
             secret_loader = DataLoader(
                 secret_dataset, 
@@ -358,7 +385,8 @@ def main():
                 shuffle=True, 
                 num_workers=int(opt.workers)
             )
-            generate(dataset=cover_dataset, cov_loader=cover_loader, secret_image=secret_loader, Hnet=Hnet)
+            with torch.no_grad():
+                generate(dataset=cover_dataset, cov_loader=cover_loader, secret_image=secret_loader, Hnet=Hnet)
         elif opt.gen_mode == 'same':
             secret_loader = DataLoader(
                 secret_dataset, 
@@ -366,7 +394,8 @@ def main():
                 shuffle=False, 
                 num_workers=int(opt.workers)
             )
-            generate(dataset=cover_dataset, cov_loader=cover_loader, secret_image=secret_loader, Hnet=Hnet)
+            with torch.no_grad():
+                generate(dataset=cover_dataset, cov_loader=cover_loader, secret_image=secret_loader, Hnet=Hnet)
     
     elif opt.mode == 'extract':
         container_loader = DataLoader(
@@ -375,7 +404,8 @@ def main():
             shuffle=False, 
             num_workers=int(opt.workers)
         )
-        extract(dataset=container_dataset, con_loader=container_loader, Rnet=Rnet)
+        with torch.no_grad():
+            extract(dataset=container_dataset, con_loader=container_loader, Rnet=Rnet)
 
 
 
@@ -421,12 +451,11 @@ def random_mask(image):
         mask_ori = np.zeros((img_hight, img_width, img_channel), dtype=np.uint8)
         cv2.drawContours(image=mask_ori, contours=[contour_pts], contourIdx=-1, color=(255,255,255), thickness=-1)
 
-        trans = transforms.Compose([transforms.ToTensor()])
-        mask_ori = trans(mask_ori).to(opt.device)
-
+        mask_ori = transforms.Compose([transforms.ToTensor()])(mask_ori).to(opt.device)
+        mask_inv = torch.ones_like(mask_ori) - mask_ori
         mask_dis = mask_ori * torch.rand_like(mask_ori)
-        img_dis = img_ori * mask_dis + img_ori * (torch.ones_like(mask_ori) - mask_ori)
-        #img_dis = img_ori * (torch.ones_like(mask_ori) - mask_ori)
+
+        img_dis = img_ori * mask_dis + img_ori * mask_inv
 
         image_dis[idx] = img_dis
         mask[idx] = mask_ori 
@@ -466,6 +495,8 @@ def forward_pass(secret_img, cover_img, Hnet, Rnet, criterion):
     
     container = watermark + cover
 
+    errH = criterion(container, cover)  # Hiding net
+
     if opt.mask_mode == 'random':
         container_tampered, mask = random_mask(container)
     elif opt.mask_mode == 'block':
@@ -476,11 +507,9 @@ def forward_pass(secret_img, cover_img, Hnet, Rnet, criterion):
     else:
         raise ValueError("Invalid Mask Mode. Must be one of [random, block, none]")
 
-
     secret_tampered = secret * (torch.ones_like(mask) - mask) 
     secret_retrieved = Rnet(container_tampered) 
 
-    errH = criterion(container, cover)  # Hiding net
     errR = criterion(secret_retrieved, secret_tampered)  # Reveal net
 
     diffH = (container-cover).abs().mean()*255
