@@ -7,7 +7,7 @@ import time
 import shutil
 import argparse
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 from tqdm import tqdm
 
 import matplotlib.pyplot as plt
@@ -29,7 +29,7 @@ from models.HidingNet import UNetDeep, UNetShallow
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--mode', type=str, default='', help='train | generate | extract')
+parser.add_argument('--mode', type=str, default='', help='train | generate | reveal | detect')
 parser.add_argument('--workers', type=int, default=2, help='number of data loading workers')
 parser.add_argument('--imageSize', type=int, default=256, help='the number of frames')
 parser.add_argument('--lr', type=float, default=0.001, help='learning rate, default=0.001')
@@ -46,6 +46,7 @@ parser.add_argument('--logFrequency', type=int, default=10, help='the frequency 
 parser.add_argument('--resultPicFrequency', type=int, default=100, help='the frequency of save the resultPic')
 parser.add_argument('--norm', default='instance', help='batch or instance')
 parser.add_argument('--loss', default='l2', help='l1 or l2')
+parser.add_argument('--Rloss_mode', default='secret0', help='secret0 | secret1 | mask')
 parser.add_argument('--Hnet_inchannel', type=int, default=3, help='1: gray; 3: color')
 parser.add_argument('--Hnet_outchannel', type=int, default=3, help='1: gray; 3: color')
 parser.add_argument('--Rnet_inchannel', type=int, default=3, help='1: gray; 3: color')
@@ -63,6 +64,7 @@ parser.add_argument('--train_dir', type=str, default='', help='directory of trai
 parser.add_argument('--cover_dir', type=str, default='', help='directory of cover images')
 parser.add_argument('--container_dir', type=str, default='', help='directory of container images')
 parser.add_argument('--secret_dir', type=str, default='', help='directory of secret images')
+parser.add_argument('--rev_secret_dir', type=str, default='', help='directory of revealed secret images')
 
 parser.add_argument('--max_epoch', type=int, default=50, help='number of epochs to train for')
 parser.add_argument('--dis_num', type=int, default=5, help='number of example image for visualization')
@@ -110,7 +112,7 @@ def main():
     if opt.mode == 'train':
         Hnet_comment = 'Hnet{}IC{}OC{}'.format(opt.Hnet_mode, opt.Hnet_inchannel, opt.Hnet_outchannel)
         Rnet_comment = 'Rnet{}IC{}OC{}'.format(opt.Rnet_mode, opt.Rnet_inchannel, opt.Rnet_outchannel)
-        opt.experiment_dir = os.path.join(opt.output_dir, cur_time+"_"+str(opt.imageSize)+"_"+opt.norm+"_"+opt.loss+"_"+Hnet_comment+"_"+Rnet_comment+"_"+str(opt.Hnet_factor)+"_"+opt.mask_mode)
+        opt.experiment_dir = os.path.join(opt.output_dir, cur_time+"_"+str(opt.imageSize)+"_"+opt.norm+"_"+opt.loss+"_"+opt.Rloss_mode+"_"+Hnet_comment+"_"+Rnet_comment+"_"+str(opt.Hnet_factor)+"_"+opt.mask_mode)
         print("[*]Saving the experiment results at {}".format(opt.experiment_dir))
 
         opt.outckpts = os.path.join(opt.experiment_dir, "CheckPoints")
@@ -136,29 +138,33 @@ def main():
         opt.experiment_dir = opt.output_dir
         print("[*]Saving the generation results at {}".format(opt.experiment_dir))
 
-        opt.loaded_secret_dir = os.path.join(opt.experiment_dir, "loaded_secret")
-        print("[*]Generating loaded secret images at: {}".format(opt.loaded_secret_dir))
-        os.makedirs(opt.loaded_secret_dir, exist_ok=True)
-
         opt.watermark_dir = os.path.join(opt.experiment_dir, "watermark")
-        print("[*]Generating processed secret images at: {}".format(opt.watermark_dir))
+        print("[*]Generate the processed secret images at: {}".format(opt.watermark_dir))
         os.makedirs(opt.watermark_dir, exist_ok=True)
             
         opt.loaded_cover_dir = os.path.join(opt.experiment_dir, "cover")
-        print("[*]Generating loaded cover images at: {}".format(opt.loaded_cover_dir))
+        print("[*]Export the loaded cover images at: {}".format(opt.loaded_cover_dir))
         os.makedirs(opt.loaded_cover_dir, exist_ok=True)
             
         opt.container_dir = os.path.join(opt.experiment_dir, 'container')
-        print("[*]Generating container images at: {}".format(opt.container_dir))
+        print("[*]Generate the container images at: {}".format(opt.container_dir))
         os.makedirs(opt.container_dir, exist_ok=True)
         
-    elif opt.mode == 'extract':
+    elif opt.mode == 'reveal':
         opt.experiment_dir = opt.output_dir
-        print("[*]Saving the extracting results at {}".format(opt.experiment_dir))
+        print("[*]Saving the revealed results at {}".format(opt.experiment_dir))
 
         opt.rev_secret_dir = os.path.join(opt.experiment_dir, "rev_secret")
-        print("[*]Generating retrieved secret images at: {}".format(opt.rev_secret_dir))
+        print("[*]Generate the retrieved secret images at: {}".format(opt.rev_secret_dir))
         os.makedirs(opt.rev_secret_dir, exist_ok=True)
+
+    elif opt.mode == 'detect':
+        opt.experiment_dir = opt.output_dir
+        print("[*]Saving the detection results at {}".format(opt.experiment_dir))
+
+        opt.mask_pd_dir = os.path.join(opt.experiment_dir, "mask_pd")
+        print("[*]Export the predict masks at: {}".format(opt.mask_pd_dir))
+        os.makedirs(opt.mask_pd_dir, exist_ok=True)
 
     ################## Datasets and Networks ##################
     if opt.norm == 'instance':
@@ -168,33 +174,33 @@ def main():
     elif opt.norm == 'none':
         norm_layer = None
     else:
-        raise ValueError("Invalid norm option. Must be one of [instance, batch, none]")
-
-    if opt.Hnet_inchannel == 1:  
-        transforms_secret = transforms.Compose([
-            transforms.Grayscale(num_output_channels=1),
-            transforms.Resize([opt.imageSize, opt.imageSize]), 
-            transforms.ToTensor()
-        ])
-    else:
-        transforms_secret = transforms.Compose([
-            transforms.Resize([opt.imageSize, opt.imageSize]), 
-            transforms.ToTensor()
-        ])
-        
-    if opt.Rnet_inchannel == 1:  
-        transforms_cover = transforms.Compose([
-            transforms.Grayscale(num_output_channels=1),
-            transforms.Resize([opt.imageSize, opt.imageSize]), 
-            transforms.ToTensor()
-        ])
-    else:
-         transforms_cover = transforms.Compose([
-             transforms.Resize([opt.imageSize, opt.imageSize]), 
-             transforms.ToTensor()
-        ])        
+        raise ValueError("Invalid norm option. Must be one of [instance, batch, none]") 
 
     if opt.mode == 'train':
+        if opt.Hnet_inchannel == 1:  
+            transforms_secret = transforms.Compose([
+                transforms.Grayscale(num_output_channels=1),
+                transforms.Resize([opt.imageSize, opt.imageSize]), 
+                transforms.ToTensor()
+            ])
+        else:
+            transforms_secret = transforms.Compose([
+                transforms.Resize([opt.imageSize, opt.imageSize]), 
+                transforms.ToTensor()
+            ])
+            
+        if opt.Rnet_inchannel == 1:  
+            transforms_cover = transforms.Compose([
+                transforms.Grayscale(num_output_channels=1),
+                transforms.Resize([opt.imageSize, opt.imageSize]), 
+                transforms.ToTensor()
+            ])
+        else:
+            transforms_cover = transforms.Compose([
+                transforms.Resize([opt.imageSize, opt.imageSize]), 
+                transforms.ToTensor()
+            ])    
+
         secret_dataset = ImageDataset(
             root = opt.secret_dir,
             transforms = transforms_secret)
@@ -223,7 +229,7 @@ def main():
 
         # Load Pre-trained mode
         if opt.checkpoint != "":
-            print('[*]Loading pre-trained model from: {}'.format(opt.checkpoint))
+            print('[*]Load pre-trained model from: {}'.format(opt.checkpoint))
             checkpoint = torch.load(opt.checkpoint)
             Hnet.load_state_dict(checkpoint['H_state_dict'], strict=True)
             Rnet.load_state_dict(checkpoint['R_state_dict'], strict=True)
@@ -240,77 +246,7 @@ def main():
             criterion = nn.MSELoss().to(opt.device)
         else:
             raise ValueError("Invalid Loss Function. Must be one of [l1, l2]")
-
-    elif opt.mode == 'generate':
-        cover_dataset = ImageDataset(root=opt.cover_dir, transforms=transforms_cover)
-
-        if opt.gen_mode == 'white':
-            # Secret Image
-            random_bits = np.ones((opt.imageSize, opt.imageSize), dtype=np.uint8)
-            if opt.Hnet_inchannel == 1:
-                random_bits = torch.from_numpy(random_bits).float().to(opt.device)
-                random_bits = random_bits.unsqueeze(dim=0)
-            else:
-                random_bits = np.stack(arrays=(random_bits, random_bits, random_bits), axis=0)
-                random_bits = torch.from_numpy(random_bits).float().to(opt.device)
-
-            secret_img = random_bits.unsqueeze(dim=0)
-        elif opt.gen_mode == 'random':
-            assert opt.secret_dir != None, 'Please assign directory of secret images if chose random generation mode'
-            secret_dataset = ImageDataset(root=opt.secret_dir, transforms=transforms_secret)
-        elif opt.gen_mode == 'same':
-            secret_dataset = cover_dataset
-        else:
-            print('[*]Please chose the corret generation mode from [white | random | same]')
-
-        if opt.Hnet_mode == 'UNetDeep':
-            Hnet = UNetDeep(input_nc=opt.Hnet_inchannel, output_nc=opt.Hnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
-        elif opt.Hnet_mode == 'UNetShallow':
-            Hnet = UNetShallow(input_nc=opt.Hnet_inchannel, output_nc=opt.Hnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
-        else:
-            raise ValueError("Invalid Hiding Net Mode. Must be one of [UNetDeep, UNetShallow]")
-
-        # Load Pre-trained mode
-        assert opt.checkpoint != None, 'Please assign directory of pre-trained mode'
-        print('[*]Loading pre-trained model from: {}'.format(opt.checkpoint))
-        checkpoint = torch.load(opt.checkpoint, map_location=opt.device)
-        Hnet.load_state_dict(checkpoint['H_state_dict'], strict=True)
-                    
-    elif opt.mode == 'extract':
-        if opt.Rnet_inchannel == 1:
-            transforms_container = transforms.Compose([
-                transforms.Grayscale(num_output_channels=1),
-                transforms.Resize([opt.imageSize, opt.imageSize]), 
-                transforms.ToTensor()
-            ])
-        else:
-            transforms_container = transforms.Compose([
-                transforms.Resize([opt.imageSize, opt.imageSize]), 
-                transforms.ToTensor()
-            ])
-
-        container_dataset = ImageDataset(root=opt.container_dir, transforms=transforms_container)
-
-        if opt.Rnet_mode == 'FullConvSkip':
-            Rnet = FullConvSkip(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
-        elif opt.Rnet_mode == 'FullConv':
-            Rnet = FullConv(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
-        elif opt.Rnet_mode == 'TransConv':
-            Rnet = TransConv(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
-        else:
-            raise ValueError("Invalid Reveal Net Mode. Must be one of [FullConvSkip, FullConv, TransConv]")
-
-        # Load Pre-trained mode
-        assert opt.checkpoint != None, 'Please assign directory of pre-trained mode'
-        print('[*]Loading pre-trained model from: {}'.format(opt.checkpoint))
-        checkpoint = torch.load(opt.checkpoint)
-        Rnet.load_state_dict(checkpoint['R_state_dict'], strict=True)
-
-    # Print networks
-    #print_network(Hnet)
-    #print_network(Rnet)
-
-    if opt.mode == 'train':
+        
         params = list(Hnet.parameters())+list(Rnet.parameters())
         optimizer = optim.Adam(params, lr=opt.lr, betas=(opt.beta_adam, 0.999))
         scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.2, patience=8, verbose=True)
@@ -369,35 +305,90 @@ def main():
         writer.close()
 
     elif opt.mode == 'generate':
+        if opt.Hnet_inchannel == 1:
+            transforms_secret = transforms.Compose([
+                transforms.Grayscale(num_output_channels=1),
+                transforms.Resize([opt.imageSize, opt.imageSize]), 
+                transforms.ToTensor()
+            ])
+        else:
+            transforms_secret = transforms.Compose([
+                transforms.Resize([opt.imageSize, opt.imageSize]), 
+                transforms.ToTensor()
+            ])
+
+        if opt.Rnet_inchannel == 1:  
+            transforms_cover = transforms.Compose([
+                transforms.Grayscale(num_output_channels=1),
+                transforms.Resize([opt.imageSize, opt.imageSize]), 
+                transforms.ToTensor()
+            ])
+        else:
+            transforms_cover = transforms.Compose([
+                transforms.Resize([opt.imageSize, opt.imageSize]), 
+                transforms.ToTensor()
+            ])    
+
+        cover_dataset = ImageDataset(root=opt.cover_dir, transforms=transforms_cover)
+
+        print('[*]Load the secret image from: {}'.format(opt.secret_dir))
+        secret_image = Image.open(opt.secret_dir).convert('RGB')
+        secret_image = secret_image.resize((opt.imageSize, opt.imageSize))
+        secret_image.save(os.path.join(opt.experiment_dir, 'secret_image.png'))
+        secret_image = transforms_secret(secret_image).to(opt.device)
+
+        if opt.Hnet_mode == 'UNetDeep':
+            Hnet = UNetDeep(input_nc=opt.Hnet_inchannel, output_nc=opt.Hnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+        elif opt.Hnet_mode == 'UNetShallow':
+            Hnet = UNetShallow(input_nc=opt.Hnet_inchannel, output_nc=opt.Hnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+        else:
+            raise ValueError("Invalid Hiding Net Mode. Must be one of [UNetDeep, UNetShallow]")
+
+        # Load Pre-trained mode
+        assert opt.checkpoint != None, 'Please assign correct directory of pre-trained mode'
+        print('[*]Load the pre-trained model from: {}'.format(opt.checkpoint))
+        checkpoint = torch.load(opt.checkpoint, map_location=opt.device)
+        Hnet.load_state_dict(checkpoint['H_state_dict'], strict=True)
+
         cover_loader = DataLoader(
             cover_dataset, 
             batch_size=opt.bs_generate,
             shuffle=False, 
             num_workers=int(opt.workers)
         )
-        if opt.gen_mode == 'white':
-            with torch.no_grad():
-                generate(dataset=cover_dataset, cov_loader=cover_loader, secret_image=secret_img, Hnet=Hnet)
-        elif opt.gen_mode == 'random':
-            secret_loader = DataLoader(
-                secret_dataset, 
-                batch_size=opt.bs_generate,
-                shuffle=True, 
-                num_workers=int(opt.workers)
-            )
-            with torch.no_grad():
-                generate(dataset=cover_dataset, cov_loader=cover_loader, secret_image=secret_loader, Hnet=Hnet)
-        elif opt.gen_mode == 'same':
-            secret_loader = DataLoader(
-                secret_dataset, 
-                batch_size=opt.bs_generate,
-                shuffle=False, 
-                num_workers=int(opt.workers)
-            )
-            with torch.no_grad():
-                generate(dataset=cover_dataset, cov_loader=cover_loader, secret_image=secret_loader, Hnet=Hnet)
-    
-    elif opt.mode == 'extract':
+        with torch.no_grad():
+            generate(dataset=cover_dataset, cov_loader=cover_loader, secret_img=secret_image, Hnet=Hnet)        
+
+    elif opt.mode == 'reveal':
+        if opt.Rnet_inchannel == 1:
+            transforms_container = transforms.Compose([
+                transforms.Grayscale(num_output_channels=1),
+                transforms.Resize([opt.imageSize, opt.imageSize]), 
+                transforms.ToTensor()
+            ])
+        else:
+            transforms_container = transforms.Compose([
+                transforms.Resize([opt.imageSize, opt.imageSize]), 
+                transforms.ToTensor()
+            ])
+
+        container_dataset = ImageDataset(root=opt.container_dir, transforms=transforms_container)
+
+        if opt.Rnet_mode == 'FullConvSkip':
+            Rnet = FullConvSkip(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+        elif opt.Rnet_mode == 'FullConv':
+            Rnet = FullConv(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+        elif opt.Rnet_mode == 'TransConv':
+            Rnet = TransConv(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+        else:
+            raise ValueError("Invalid Reveal Net Mode. Must be one of [FullConvSkip, FullConv, TransConv]")
+
+        # Load Pre-trained mode
+        assert opt.checkpoint != None, 'Please assign correct directory of pre-trained mode'
+        print('[*]Load the pre-trained model from: {}'.format(opt.checkpoint))
+        checkpoint = torch.load(opt.checkpoint)
+        Rnet.load_state_dict(checkpoint['R_state_dict'], strict=True)
+
         container_loader = DataLoader(
             container_dataset, 
             batch_size=opt.bs_extract,
@@ -405,7 +396,70 @@ def main():
             num_workers=int(opt.workers)
         )
         with torch.no_grad():
-            extract(dataset=container_dataset, con_loader=container_loader, Rnet=Rnet)
+            reveal(dataset=container_dataset, con_loader=container_loader, Rnet=Rnet)   
+
+    elif opt.mode == 'detect':
+        print('[*]Load the secret image from: {}'.format(opt.secret_dir))
+        secret_image = Image.open(opt.secret_dir).convert('RGB')
+        secret_image = secret_image.resize((opt.imageSize, opt.imageSize))
+
+        if opt.Rnet_inchannel == 1:
+            image_transforms = transforms.Compose([
+                transforms.Grayscale(num_output_channels=1),
+                transforms.Resize([opt.imageSize, opt.imageSize]), 
+                transforms.ToTensor()
+            ])
+        else:
+            image_transforms = transforms.Compose([
+                transforms.Resize([opt.imageSize, opt.imageSize]), 
+                transforms.ToTensor()
+            ])
+        
+        if opt.container_dir == '' and opt.rev_secret_dir != '':
+            print('[*]The directory asssigned is pointing to revealed secret images, so executing detection without Rnet!')
+            image_dataset = ImageDataset(root=opt.rev_secret_dir, transforms=image_transforms)
+
+            image_loader = DataLoader(
+                        image_dataset, 
+                        batch_size=opt.bs_extract,
+                        shuffle=False, 
+                        num_workers=int(opt.workers)
+                    )
+            with torch.no_grad():
+                detect(dataset=image_dataset, data_loader=image_loader, secret_img=secret_image, Rnet=None)
+
+        elif opt.container_dir != '' and opt.rev_secret_dir == '':
+            print('[*]The directory asssigned is pointing to container images, so executing detection with Rnet!')
+            image_dataset = ImageDataset(root=opt.container_dir, transforms=image_transforms)
+
+            if opt.Rnet_mode == 'FullConvSkip':
+                Rnet = FullConvSkip(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+            elif opt.Rnet_mode == 'FullConv':
+                Rnet = FullConv(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+            elif opt.Rnet_mode == 'TransConv':
+                Rnet = TransConv(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
+            else:
+                raise ValueError("Invalid Reveal Net Mode. Must be one of [FullConvSkip, FullConv, TransConv]")
+
+            # Load Pre-trained mode
+            assert opt.checkpoint != None, 'Please assign correct directory of pre-trained mode'
+            print('[*]Load the pre-trained model from: {}'.format(opt.checkpoint))
+            checkpoint = torch.load(opt.checkpoint)
+            Rnet.load_state_dict(checkpoint['R_state_dict'], strict=True)
+            
+            image_loader = DataLoader(
+                        image_dataset, 
+                        batch_size=opt.bs_extract,
+                        shuffle=False, 
+                        num_workers=int(opt.workers)
+                    )
+            with torch.no_grad():
+                detect(dataset=image_dataset, data_loader=image_loader, secret_img=secret_image, Rnet=Rnet)
+        else:
+            raise ValueError("The target images to detect must be one of revealed secret images or container images")
+
+    else:
+        raise ValueError("Please select correct running mode. Must be one of [train | generate | reveal | detect]")
 
 
 
@@ -506,14 +560,19 @@ def forward_pass(secret_img, cover_img, Hnet, Rnet, criterion):
         mask = torch.zeros_like(container)
     else:
         raise ValueError("Invalid Mask Mode. Must be one of [random, block, none]")
-
-    secret_tampered = secret * (torch.ones_like(mask) - mask) 
-    secret_retrieved = Rnet(container_tampered) 
-
-    errR = criterion(secret_retrieved, secret_tampered)  # Reveal net
+    
+    if opt.Rloss_mode == 'secret0':
+        tampered = secret * (torch.ones_like(mask) - mask) 
+    elif opt.Rloss_mode == 'secret1':
+        tampered = secret * (torch.ones_like(mask) - mask) + mask
+    elif opt.Rloss_mode == 'mask':
+        tampered = mask
+    
+    retrieved = Rnet(container_tampered) 
+    errR = criterion(retrieved, tampered)  # Reveal net
 
     diffH = (container-cover).abs().mean()*255
-    diffR = (secret_retrieved-secret_tampered).abs().mean()*255
+    diffR = (retrieved-tampered).abs().mean()*255
 
     image_dict = {
         'secret': secret,
@@ -521,8 +580,8 @@ def forward_pass(secret_img, cover_img, Hnet, Rnet, criterion):
         'watermark': watermark,
         'container': container,
         'container_tampered': container_tampered,
-        'secret_tampered': secret_tampered,
-        'secret_retrieved': secret_retrieved
+        'secret_tampered': tampered,
+        'secret_retrieved': retrieved
     }
     data_dict = {
         'errH': errH,
@@ -601,6 +660,7 @@ def train(train_loader, epoch, Hnet, Rnet, criterion):
     writer.add_scalar('train/R_diff', Rdiff.avg, epoch)
 
 
+
 def validation(val_loader, epoch, Hnet, Rnet, criterion):
     print("#################################################### validation begin ####################################################")    
     batch_time = AverageMeter()
@@ -652,62 +712,37 @@ def validation(val_loader, epoch, Hnet, Rnet, criterion):
     return Hlosses.avg, Rlosses.avg, Hdiff.avg, Rdiff.avg
 
 
-def generate(dataset, cov_loader, secret_image, Hnet):
+
+def generate(dataset, cov_loader, secret_img, Hnet):
     Hnet.eval()
 
     idx = 0
-    if opt.gen_mode == 'white':
-        for cover_batch in tqdm(cov_loader):
-            cover_batch = cover_batch.to(opt.device)
-            batch_size_cover, _, _, _ = cover_batch.size()
+    for cover_batch in tqdm(cov_loader):
+        cover_batch = cover_batch.to(opt.device)
+        batch_size_cover, _, _, _ = cover_batch.size()
 
-            H_input = secret_image.repeat(batch_size_cover, 1, 1, 1)
+        H_input = secret_img.repeat(batch_size_cover, 1, 1, 1)
 
-            watermark_batch = Hnet(H_input) * opt.Hnet_factor
+        watermark_batch = Hnet(H_input) * opt.Hnet_factor
 
-            container_batch = watermark_batch + cover_batch
+        container_batch = watermark_batch + cover_batch
 
-            for i, container in enumerate(container_batch):
-                secret_img = tensor2img(H_input[i].clone())
-                watermark_img = tensor2img(watermark_batch[i]*10 +0.5)
-                cover_img = tensor2img(cover_batch[i])
-                container_img = tensor2img(container)
+        for i, container in enumerate(container_batch):
+            watermark_img = tensor2img(watermark_batch[i]*10 +0.5)
+            cover_img = tensor2img(cover_batch[i])
+            container_img = tensor2img(container)
 
-                img_name = os.path.basename(dataset.image_paths[idx]).split('.')[0]
+            img_name = os.path.basename(dataset.image_paths[idx]).split('.')[0]
 
-                secret_img.save(os.path.join(opt.loaded_secret_dir, '{}.png'.format(img_name)))
-                watermark_img.save(os.path.join(opt.watermark_dir, '{}.png'.format(img_name)))
-                cover_img.save(os.path.join(opt.loaded_cover_dir, '{}.png'.format(img_name)))
-                container_img.save(os.path.join(opt.container_dir, '{}.png'.format(img_name)))
+            watermark_img.save(os.path.join(opt.watermark_dir, '{}.png'.format(img_name)))
+            cover_img.save(os.path.join(opt.loaded_cover_dir, '{}.png'.format(img_name)))
+            container_img.save(os.path.join(opt.container_dir, '{}.png'.format(img_name)))
 
-                idx += 1
-    else:
-        for (cover_batch, secret_batch) in tqdm(zip(cov_loader, secret_image)):
-            cover_batch = cover_batch.to(opt.device)
-            secret_batch = secret_batch.to(opt.device)
-
-            watermark_batch = Hnet(secret_batch) * opt.Hnet_factor
-            
-            container_batch = watermark_batch + cover_batch
-
-            for i, container in enumerate(container_batch):
-                secret_img = tensor2img(secret_batch[i])
-                watermark_img = tensor2img(watermark_batch[i]*10 +0.5)
-                cover_img = tensor2img(cover_batch[i])
-                container_img = tensor2img(container)
-
-                img_name = os.path.basename(dataset.image_paths[idx]).split('.')[0]
-
-                secret_img.save(os.path.join(opt.loaded_secret_dir, '{}.png'.format(img_name)))
-                watermark_img.save(os.path.join(opt.watermark_dir, '{}.png'.format(img_name)))
-                cover_img.save(os.path.join(opt.cover_dir, '{}.png'.format(img_name)))
-                container_img.save(os.path.join(opt.container_dir, '{}.png'.format(img_name)))
-
-                idx += 1       
+            idx += 1
 
 
 
-def extract(dataset, con_loader, Rnet):
+def reveal(dataset, con_loader, Rnet):
     Rnet.eval()
 
     idx = 0
@@ -720,26 +755,49 @@ def extract(dataset, con_loader, Rnet):
         for _, rev_secret in enumerate(rev_secret_bath):
             img_name = os.path.basename(dataset.image_paths[idx])
 
-            detection_img = (rev_secret < opt.threshold).type(torch.int8)
-
-            img_ori = tensor2array(detection_img)
-            img_gray = cv2.cvtColor(img_ori, cv2.COLOR_RGB2GRAY)
-
-            _, img_binary = cv2.threshold(src=img_gray, thresh=0, maxval=255, type=cv2.THRESH_BINARY) 
-
-            contours, _ = cv2.findContours(img_binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-
-            result = np.zeros_like(img_gray)
-            try:
-                for contour in contours:
-                    cv2.drawContours(image=result, contours=[contour], contourIdx=-1, color=(255,255,255), thickness=-1)
-            except:
-                None
-
-            img_result = Image.fromarray(result.astype('uint8'))
-            img_result.save(os.path.join(opt.rev_secret_dir, img_name))
+            rev_secret_img = tensor2img(rev_secret)
+            rev_secret_img.save(os.path.join(opt.rev_secret_dir, img_name))
 
             idx += 1
+
+
+
+def detect(dataset, data_loader, secret_img, Rnet):
+    secret_img = np.array(secret_img, dtype='int32')
+
+    if Rnet != None:
+        Rnet.eval()
+        idx = 0
+        for container_batch in tqdm(data_loader):
+            container_batch = container_batch.to(opt.device)
+
+            rev_secret_bath = Rnet(container_batch)
+
+            for _, rev_secret in enumerate(rev_secret_bath):
+                img_name = os.path.basename(dataset.image_paths[idx])
+
+                rev_secret = tensor2array(rev_secret)
+
+                gap = np.abs(secret_img - rev_secret)
+
+                gap_img = Image.fromarray(gap.astype('uint8'))
+                gap_img.save(os.path.join(opt.mask_pd_dir, img_name))
+                idx += 1
+    else:
+        idx = 0
+        for rev_secret_batch in tqdm(data_loader):
+            rev_secret_batch = rev_secret_batch.to(opt.device)
+
+            for _, rev_secret in enumerate(rev_secret_batch):
+                img_name = os.path.basename(dataset.image_paths[idx])
+
+                rev_secret = tensor2array(rev_secret)
+
+                gap = np.abs(secret_img - rev_secret)
+
+                gap_img = Image.fromarray(gap.astype('uint8'))
+                gap_img.save(os.path.join(opt.mask_pd_dir, img_name))
+                idx += 1        
 
 
 
@@ -750,7 +808,7 @@ def tensor2array(var):
     var = var * 255
     if var.shape[2] == 1:
         var = np.squeeze(var, axis=2)
-    return var.astype('uint8')
+    return var.astype('int32')
 
 
 
