@@ -23,9 +23,9 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from utils.dataset import ImageDataset
-from models.AdversarialNet import AdversaryConv, AdversaryTransConv
-from models.HidingNet import UNetDeep, UNetShallow
+from models.DetectNet import ResNet18
 from models.RevealNet import FullConvSkip, FullConv, TransConv
+from models.HidingNet import UNetDeep, UNetShallow
 
 
 
@@ -100,7 +100,7 @@ def print_network(net):
 
 def main():
     ############### Define global parameters ###############
-    global opt, optimizer_adv, optimizer, writer, logPath, scheduler, val_loader, smallestLoss
+    global opt, optimizer, writer, logPath, scheduler, val_loader, smallestLoss
 
     opt = parser.parse_args()
     opt.Hnet_factor = 1
@@ -162,6 +162,10 @@ def main():
     elif opt.mode == 'detect':
         opt.experiment_dir = opt.output_dir
         print("[*]Saving the detection results at {}".format(opt.experiment_dir))
+        
+        opt.gap_dir = os.path.join(opt.experiment_dir, "gap")
+        print("[*]Export the gap between the revealed secret and original secret at: {}".format(opt.gap_dir))
+        os.makedirs(opt.gap_dir, exist_ok=True)
 
         opt.mask_pd_dir = os.path.join(opt.experiment_dir, "mask_pd")
         print("[*]Export the predict masks at: {}".format(opt.mask_pd_dir))
@@ -212,6 +216,8 @@ def main():
             root = opt.val_dir,
             transforms = transforms_cover)
 
+        Dnet = ResNet18(in_channels=3, out_channels=1, output_function=nn.Sigmoid()).to(opt.device)
+
         if opt.Hnet_mode == 'UNetDeep':
             Hnet = UNetDeep(input_nc=opt.Hnet_inchannel, output_nc=opt.Hnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
         elif opt.Hnet_mode == 'UNetShallow':
@@ -227,21 +233,18 @@ def main():
             Rnet = TransConv(input_nc=opt.Rnet_inchannel, output_nc=opt.Rnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
         else:
             raise ValueError("Invalid Reveal Net Mode. Must be one of [FullConvSkip, FullConv, TransConv]")
-        
-        
-        Anet = AdversaryConv(input_nc=opt.Hnet_outchannel, output_nc=opt.Rnet_inchannel).to(opt.device)
 
         # Load Pre-trained mode
         if opt.checkpoint != "":
             print('[*]Load pre-trained model from: {}'.format(opt.checkpoint))
             checkpoint = torch.load(opt.checkpoint)
-            Anet.load_state_dict(checkpoint['A_state_dict'], strict=True)
+            Dnet.load_state_dict(checkpoint['D_state_dict'], strict=True)
             Hnet.load_state_dict(checkpoint['H_state_dict'], strict=True)
             Rnet.load_state_dict(checkpoint['R_state_dict'], strict=True)
         else:
             # Using Kaiming Normalization to initialize network's parameters
             print('[*]Training from scratch')
-            Anet.apply(weights_init)
+            Dnet.apply(weights_init)
             Hnet.apply(weights_init)
             Rnet.apply(weights_init)
 
@@ -253,9 +256,9 @@ def main():
         else:
             raise ValueError("Invalid Loss Function. Must be one of [l1, l2]")
         
-        optimizer_adv = optim.Adam(Anet.parameters(), lr=opt.lr, betas=(opt.beta_adam, 0.999))
-
-        params = list(Hnet.parameters())+list(Rnet.parameters())
+        d_criterion = nn.BCELoss().to(opt.device)
+        
+        params = list(Dnet.parameters())+list(Hnet.parameters())+list(Rnet.parameters())
         optimizer = optim.Adam(params, lr=opt.lr, betas=(opt.beta_adam, 0.999))
         scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.2, patience=8, verbose=True)
 
@@ -287,24 +290,23 @@ def main():
             val_loader = zip(secret_loader, val_loader_cover)
 
             ################## train ##################
-            train(train_loader, epoch, Anet=Anet, Hnet=Hnet, Rnet=Rnet, criterion=criterion)
+            train(train_loader, epoch, Dnet=Dnet, Hnet=Hnet, Rnet=Rnet, criterion=criterion, d_criterion=d_criterion)
 
             ################## validation  ##################
             with torch.no_grad():
-                #val_hloss, val_rloss, val_hdiff, val_rdiff = validation(val_loader, epoch, Hnet=Hnet, Rnet=Rnet, criterion=criterion)
-                val_hloss, val_rloss, val_hdiff, val_rdiff = validation(val_loader, epoch, Anet=Anet, Hnet=Hnet, Rnet=Rnet, criterion=criterion)
+                val_dloss, val_hloss, val_rloss, val_ddiff, val_hdiff, val_rdiff = validation(val_loader, epoch, Dnet=Dnet, Hnet=Hnet, Rnet=Rnet, criterion=criterion, d_criterion=d_criterion)
 
             ################## adjust learning rate ##################
             scheduler.step(val_rloss) # 注意！这里只用 R 网络的 loss 进行 learning rate 的更新
 
             # Save the best model parameters
-            sum_diff = val_hdiff + val_rdiff
+            sum_diff = val_ddiff + val_hdiff + val_rdiff
             is_best = sum_diff < globals()["smallestLoss"]
             globals()["smallestLoss"] = sum_diff
 
             stat_dict = {
                 'epoch': epoch + 1,
-                'A_state_dict': Anet.state_dict(),
+                'D_state_dict': Dnet.state_dict(),
                 'H_state_dict': Hnet.state_dict(),
                 'R_state_dict': Rnet.state_dict(),
                 'optimizer' : optimizer.state_dict(),
@@ -381,8 +383,6 @@ def main():
                 transforms.Resize([opt.imageSize, opt.imageSize]), 
                 transforms.ToTensor()
             ])
-        
-        Anet = AdversaryConv(input_nc=opt.Hnet_outchannel, output_nc=opt.Rnet_inchannel).to(opt.device)
 
         container_dataset = ImageDataset(root=opt.container_dir, transforms=transforms_container)
 
@@ -399,7 +399,6 @@ def main():
         assert opt.checkpoint != None, 'Please assign correct directory of pre-trained mode'
         print('[*]Load the pre-trained model from: {}'.format(opt.checkpoint))
         checkpoint = torch.load(opt.checkpoint)
-        Anet.load_state_dict(checkpoint['A_state_dict'], strict=True)
         Rnet.load_state_dict(checkpoint['R_state_dict'], strict=True)
 
         container_loader = DataLoader(
@@ -409,13 +408,13 @@ def main():
             num_workers=int(opt.workers)
         )
         with torch.no_grad():
-            #reveal(dataset=container_dataset, con_loader=container_loader, Rnet=Rnet)
-            reveal(dataset=container_dataset, con_loader=container_loader, Anet=Anet, Rnet=Rnet)
+            reveal(dataset=container_dataset, con_loader=container_loader, Rnet=Rnet)   
 
     elif opt.mode == 'detect':
         print('[*]Load the secret image from: {}'.format(opt.secret_dir))
         secret_image = Image.open(opt.secret_dir).convert('RGB')
-        secret_image = secret_image.resize((opt.imageSize, opt.imageSize))
+        #secret_image = secret_image.resize((opt.imageSize, opt.imageSize))
+        #secret_image = cv2.cvtColor(cv2.imread(opt.secret_dir), cv2.COLOR_BGR2RGB)
 
         if opt.Rnet_inchannel == 1:
             image_transforms = transforms.Compose([
@@ -428,7 +427,17 @@ def main():
                 transforms.Resize([opt.imageSize, opt.imageSize]), 
                 transforms.ToTensor()
             ])
-        
+
+        secret_image = image_transforms(secret_image).to(opt.device)
+        #secret_image = torch.unsqueeze(secret_image, dim=0)
+
+        Dnet = ResNet18(in_channels=3, out_channels=1, output_function=nn.Sigmoid()).to(opt.device)
+
+        assert opt.checkpoint != None, 'Please assign correct directory of pre-trained mode'
+        print('[*]Load the pre-trained model from: {}'.format(opt.checkpoint))
+        checkpoint = torch.load(opt.checkpoint)
+        Dnet.load_state_dict(checkpoint['D_state_dict'], strict=True)
+
         if opt.container_dir == '' and opt.rev_secret_dir != '':
             print('[*]The directory asssigned is pointing to revealed secret images, so executing detection without Rnet!')
             image_dataset = ImageDataset(root=opt.rev_secret_dir, transforms=image_transforms)
@@ -440,7 +449,7 @@ def main():
                         num_workers=int(opt.workers)
                     )
             with torch.no_grad():
-                detect(dataset=image_dataset, data_loader=image_loader, secret_img=secret_image, Rnet=None)
+                detect(dataset=image_dataset, data_loader=image_loader, secret_img=secret_image, Dnet=Dnet, Rnet=None)
 
         elif opt.container_dir != '' and opt.rev_secret_dir == '':
             print('[*]The directory asssigned is pointing to container images, so executing detection with Rnet!')
@@ -456,9 +465,6 @@ def main():
                 raise ValueError("Invalid Reveal Net Mode. Must be one of [FullConvSkip, FullConv, TransConv]")
 
             # Load Pre-trained mode
-            assert opt.checkpoint != None, 'Please assign correct directory of pre-trained mode'
-            print('[*]Load the pre-trained model from: {}'.format(opt.checkpoint))
-            checkpoint = torch.load(opt.checkpoint)
             Rnet.load_state_dict(checkpoint['R_state_dict'], strict=True)
             
             image_loader = DataLoader(
@@ -468,7 +474,7 @@ def main():
                         num_workers=int(opt.workers)
                     )
             with torch.no_grad():
-                detect(dataset=image_dataset, data_loader=image_loader, secret_img=secret_image, Rnet=Rnet)
+                detect(dataset=image_dataset, data_loader=image_loader, secret_img=secret_image, Dnet=Dnet, Rnet=Rnet)
         else:
             raise ValueError("The target images to detect must be one of revealed secret images or container images")
 
@@ -555,7 +561,7 @@ def block_mask(image):
 
 
 
-def forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion):
+def forward_pass(secret_img, cover_img, Dnet, Hnet, Rnet, criterion, d_criterion):
     secret = secret_img.to(opt.device)
     cover = cover_img.to(opt.device)
 
@@ -565,15 +571,13 @@ def forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion):
 
     errH = criterion(container, cover)  # Hiding net
 
-    container_adv = Anet(container)
-
     if opt.mask_mode == 'random':
-        container_tampered, mask = random_mask(container_adv)
+        container_tampered, mask = random_mask(container)
     elif opt.mask_mode == 'block':
-        container_tampered, mask = block_mask(container_adv)
+        container_tampered, mask = block_mask(container)
     elif opt.mask_mode == 'none':
-        container_tampered = container_adv
-        mask = torch.zeros_like(container_adv)
+        container_tampered = container
+        mask = torch.zeros_like(container)
     else:
         raise ValueError("Invalid Mask Mode. Must be one of [random, block, none]")
     
@@ -584,141 +588,90 @@ def forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion):
     elif opt.Rloss_mode == 'mask':
         tampered = mask
     
-    #retrieved_ori = Rnet(container) 
-    #retrieved_adv = Rnet(container_adv) 
-    retrieved_tam = Rnet(container_tampered) 
+    retrieved = Rnet(container_tampered) 
+    errR = criterion(retrieved, tampered)  # Reveal net
 
-    #errR = 0.4*criterion(retrieved_ori, secret) + 0.2*criterion(retrieved_adv, secret) + 0.4*criterion(retrieved_tam, tampered) # Reveal net
-    errR = criterion(retrieved_tam, tampered) # Reveal net
+    #gap = torch.abs(retrieved - secret)
+    gap = retrieved - secret
 
+    """relu = nn.ReLU()
+    gap = relu(gap*10 + 0.5)"""
+
+    rev_mask = Dnet(gap)
+    rev_mask_tri = rev_mask.repeat(1,3,1,1)
+    errD = d_criterion(rev_mask_tri, mask)
+
+    diffD = (rev_mask_tri-mask).abs().mean()*255
     diffH = (container-cover).abs().mean()*255
-    diffR = (retrieved_tam-tampered).abs().mean()*255
+    diffR = (retrieved-tampered).abs().mean()*255
 
     image_dict = {
         'secret': secret,
         'cover': cover,
         'watermark': watermark,
         'container': container,
-        'container_adv': container_adv,
         'container_tampered': container_tampered,
         'secret_tampered': tampered,
-        'secret_retrieved': retrieved_tam
+        'secret_retrieved': retrieved,
+        'mask_gt': mask,
+        'mask_pd': rev_mask_tri
     }
     data_dict = {
+        'errD': errD,
         'errH': errH,
         'errR': errR, 
+        'diffD': diffD, 
         'diffH': diffH, 
         'diffR': diffR
     }
     return image_dict, data_dict
 
 
-
-def validation_pass(secret_img, cover_img, Hnet, Rnet, criterion):
-    secret = secret_img.to(opt.device)
-    cover = cover_img.to(opt.device)
-
-    watermark = Hnet(secret) * opt.Hnet_factor
-    
-    container = watermark + cover
-
-    errH = criterion(container, cover)  # Hiding net
-    
-    rev_secret = Rnet(container) 
-
-    errR = criterion(rev_secret, secret) # Reveal net
-
-    diffH = (container-cover).abs().mean()*255
-    diffR = (rev_secret-secret).abs().mean()*255
-
-    image_dict = {
-        'secret': secret,
-        'cover': cover,
-        'watermark': watermark,
-        'container': container,
-        'secret_retrieved': rev_secret
-    }
-    data_dict = {
-        'errH': errH,
-        'errR': errR, 
-        'diffH': diffH, 
-        'diffR': diffR
-    }
-    return image_dict, data_dict
-
-
-
-def adversarial_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion):
-    secret = secret_img.to(opt.device)
-    cover = cover_img.to(opt.device)
-
-    watermark = Hnet(secret) * opt.Hnet_factor
-    
-    container = watermark + cover
-
-    container_adv = Anet(container)
-
-    rev_secret_adv = Rnet(container_adv)
-
-    errA = 15.0*criterion(container_adv, container)  - 1.0*criterion(rev_secret_adv, secret)
-
-    return errA
-
-
-def train(train_loader, epoch, Anet, Hnet, Rnet, criterion):
+def train(train_loader, epoch, Dnet, Hnet, Rnet, criterion, d_criterion):
     batch_time = AverageMeter()
     data_time = AverageMeter()
-    Alosses = AverageMeter()  
+    Dlosses = AverageMeter()  
     Hlosses = AverageMeter()  
     Rlosses = AverageMeter() 
     SumLosses = AverageMeter()
+    Ddiff = AverageMeter()
     Hdiff = AverageMeter()
     Rdiff = AverageMeter()
+
+    # Switch to train mode
+    Dnet.train()
+    Hnet.train()
+    Rnet.train()
 
     start_time = time.time()
 
     for i, (secret_img, cover_img) in enumerate(train_loader):
+
         data_time.update(time.time() - start_time)
 
-        ########## Train Adversarial Net ##########
-        Anet.train()
-        Hnet.eval()
-        Rnet.eval()
+        image_dict, data_dict = forward_pass(secret_img, cover_img, Dnet, Hnet, Rnet, criterion, d_criterion)
 
-        errA = adversarial_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion)
-
-        Alosses.update(errA.data, opt.bs_train) # A loss
-
-        optimizer_adv.zero_grad()
-        errA.backward()
-        optimizer_adv.step()
-
-        ########## Train Hide Net and Reveal Net ##########
-        Anet.eval()
-        Hnet.train()
-        Rnet.train()
-
-        image_dict, data_dict = forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion)
-
+        Dlosses.update(data_dict['errD'].data, opt.bs_train)  # D loss
         Hlosses.update(data_dict['errH'].data, opt.bs_train)  # H loss
         Rlosses.update(data_dict['errR'].data, opt.bs_train)  # R loss
-        SumLosses.update(data_dict['errH'].data + data_dict['errR'].data, opt.bs_train) # H loss + R loss
+        SumLosses.update(data_dict['errD'].data + data_dict['errH'].data + data_dict['errR'].data, opt.bs_train) # H loss + R loss
+        Ddiff.update(data_dict['diffD'].data, opt.bs_train)
         Hdiff.update(data_dict['diffH'].data, opt.bs_train)
         Rdiff.update(data_dict['diffR'].data, opt.bs_train)
 
         # Loss, backprop, and optimization step
-        err_sum = data_dict['errH'] + data_dict['errR'] * opt.Rnet_beta
+        err_sum = data_dict['errD']*10.0 +  data_dict['errH'] + data_dict['errR']*opt.Rnet_beta
         optimizer.zero_grad()
         err_sum.backward()
         optimizer.step()
 
-        ########## Time spent on one batch ##########
+        # Time spent on one batch
         batch_time.update(time.time() - start_time)
         start_time = time.time()
 
-        log = '[{:d}/{:d}][{:d}/{:d}] Loss_A: {:.6f} Loss_H: {:.6f} Loss_R: {:.6f} Loss_Sum: {:.6f} L1_H: {:.4f} L1_R: {:.4f} datatime: {:.4f} batchtime: {:.4f}'.format(
+        log = '[{:d}/{:d}][{:d}/{:d}] Loss_D: {:.6f} Loss_H: {:.6f} Loss_R: {:.6f} Loss_Sum: {:.6f} L1_D: {:.4f} L1_H: {:.4f} L1_R: {:.4f} datatime: {:.4f} batchtime: {:.4f}'.format(
             epoch, opt.max_epoch, i, opt.max_train_iters,
-            Alosses.val, Hlosses.val, Rlosses.val, SumLosses.val, Hdiff.val, Rdiff.val, 
+            Dlosses.val, Hlosses.val, Rlosses.val, SumLosses.val, Ddiff.val, Hdiff.val, Rdiff.val, 
             data_time.val, batch_time.val
         )
 
@@ -734,43 +687,46 @@ def train(train_loader, epoch, Anet, Hnet, Rnet, criterion):
     # To save the last batch only
     save_result_pic(opt.dis_num, image_dict, epoch, i, opt.trainpics)
 
-    epoch_log = "Training[{:d}] Aloss={:.6f} Hloss={:.6f} Rloss={:.6f} SumLoss={:.6f} Hdiff={:.4f} Rdiff={:.4f} lr={:.6f} Epoch time={:.4f}".format(
-        epoch, Alosses.avg, Hlosses.avg, Rlosses.avg, SumLosses.avg, Hdiff.avg, Rdiff.avg, optimizer.param_groups[0]['lr'], batch_time.sum
+    epoch_log = "Training[{:d}] Dloss={:.6f} Hloss={:.6f} Rloss={:.6f} SumLoss={:.6f} Ddiff={:.4f} Hdiff={:.4f} Rdiff={:.4f} lr={:.6f} Epoch time={:.4f}".format(
+        epoch, Dlosses.avg, Hlosses.avg, Rlosses.avg, SumLosses.avg, Ddiff.avg, Hdiff.avg, Rdiff.avg, optimizer.param_groups[0]['lr'], batch_time.sum
     )
     print_log(epoch_log, logPath)
 
     writer.add_scalar("lr/lr", optimizer.param_groups[0]['lr'], epoch)
-    writer.add_scalar('train/A_loss', Alosses.avg, epoch)
+    writer.add_scalar('train/D_loss', Dlosses.avg, epoch)
     writer.add_scalar('train/H_loss', Hlosses.avg, epoch)
     writer.add_scalar('train/R_loss', Rlosses.avg, epoch)
     writer.add_scalar('train/Sum_loss', SumLosses.avg, epoch)
+    writer.add_scalar('train/D_diff', Ddiff.avg, epoch)
     writer.add_scalar('train/H_diff', Hdiff.avg, epoch)
     writer.add_scalar('train/R_diff', Rdiff.avg, epoch)
 
 
 
-#def validation(val_loader, epoch, Hnet, Rnet, criterion):
-def validation(val_loader, epoch, Anet, Hnet, Rnet, criterion):
+def validation(val_loader, epoch, Dnet, Hnet, Rnet, criterion, d_criterion):
     print("#################################################### validation begin ####################################################")    
     batch_time = AverageMeter()
+    Dlosses = AverageMeter()
     Hlosses = AverageMeter()
     Rlosses = AverageMeter()  
+    Ddiff = AverageMeter()
     Hdiff = AverageMeter()
     Rdiff = AverageMeter()
 
     start_time = time.time()
 
-    Anet.eval()
+    Dnet.eval()
     Hnet.eval()
     Rnet.eval()
 
     for i, (secret_img, cover_img) in enumerate(val_loader):
 
-        #image_dict, data_dict = validation_pass(secret_img, cover_img, Hnet, Rnet, criterion)
-        image_dict, data_dict = forward_pass(secret_img, cover_img, Anet, Hnet, Rnet, criterion)
+        image_dict, data_dict = forward_pass(secret_img, cover_img, Dnet, Hnet, Rnet, criterion, d_criterion)
 
+        Dlosses.update(data_dict['errD'].data, opt.bs_train)  # D loss
         Hlosses.update(data_dict['errH'].data, opt.bs_train)  # H loss
         Rlosses.update(data_dict['errR'].data, opt.bs_train)  # R loss
+        Ddiff.update(data_dict['diffD'].data, opt.bs_train)
         Hdiff.update(data_dict['diffH'].data, opt.bs_train)
         Rdiff.update(data_dict['diffR'].data, opt.bs_train)
         
@@ -780,28 +736,29 @@ def validation(val_loader, epoch, Anet, Hnet, Rnet, criterion):
         batch_time.update(time.time() - start_time)
         start_time = time.time()
 
-        val_log = "Validation[{:d}][{:d}/{:d}] val_Hloss = {:.6f} val_Rloss = {:.6f} val_Hdiff = {:.4f} val_Rdiff={:.4f} batch time={:.4f}".format(
+        val_log = "Validation[{:d}][{:d}/{:d}] val_Dloss = {:.6f} val_Hloss = {:.6f} val_Rloss = {:.6f} val_Ddiff = {:.4f} val_Hdiff = {:.4f} val_Rdiff={:.4f} batch time={:.4f}".format(
             epoch, i, opt.max_val_iters,
-            Hlosses.val, Rlosses.val, Hdiff.val, Rdiff.val, 
+            Dlosses.val, Hlosses.val, Rlosses.val, Ddiff.val, Hdiff.val, Rdiff.val, 
             batch_time.val
         )
         if i % opt.logFrequency == 0:
             print(val_log)
     
-    #save_validation_pic(opt.dis_num, image_dict, epoch, i, opt.validationpics)
     save_result_pic(opt.dis_num, image_dict, epoch, i, opt.validationpics)
     
-    val_log = "Validation[{:d}] val_Hloss = {:.6f} val_Rloss = {:.6f} val_Hdiff = {:.4f} val_Rdiff={:.4f} batch time={:.4f}".format(
-        epoch, Hlosses.avg, Rlosses.avg, Hdiff.avg, Rdiff.avg, batch_time.sum)
+    val_log = "Validation[{:d}] val_Dloss = {:.6f} val_Hloss = {:.6f} val_Rloss = {:.6f} val_Ddiff = {:.4f} val_Hdiff = {:.4f} val_Rdiff={:.4f} batch time={:.4f}".format(
+        epoch, Dlosses.avg, Hlosses.avg, Rlosses.avg, Ddiff.avg, Hdiff.avg, Rdiff.avg, batch_time.sum)
     print_log(val_log, logPath)
 
+    writer.add_scalar('validation/D_loss_avg', Dlosses.avg, epoch)
     writer.add_scalar('validation/H_loss_avg', Hlosses.avg, epoch)
     writer.add_scalar('validation/R_loss_avg', Rlosses.avg, epoch)
+    writer.add_scalar('validation/D_diff_avg', Ddiff.avg, epoch)
     writer.add_scalar('validation/H_diff_avg', Hdiff.avg, epoch)
     writer.add_scalar('validation/R_diff_avg', Rdiff.avg, epoch)
 
     print("#################################################### validation end ####################################################")
-    return Hlosses.avg, Rlosses.avg, Hdiff.avg, Rdiff.avg
+    return Dlosses.avg, Hlosses.avg, Rlosses.avg, Ddiff.avg, Hdiff.avg, Rdiff.avg
 
 
 
@@ -833,8 +790,8 @@ def generate(dataset, cov_loader, secret_img, Hnet):
             idx += 1
 
 
-#def reveal(dataset, con_loader, Rnet):
-def reveal(dataset, con_loader, Anet, Rnet):
+
+def reveal(dataset, con_loader, Rnet):
     Rnet.eval()
 
     idx = 0
@@ -842,9 +799,7 @@ def reveal(dataset, con_loader, Anet, Rnet):
     for container_batch in tqdm(con_loader):
         container_batch = container_batch.to(opt.device)
 
-        #rev_secret_bath = Rnet(container_batch)
-        container_adv = Anet(container_batch)
-        rev_secret_bath = Rnet(container_adv)
+        rev_secret_bath = Rnet(container_batch)
 
         for _, rev_secret in enumerate(rev_secret_bath):
             img_name = os.path.basename(dataset.image_paths[idx])
@@ -856,8 +811,10 @@ def reveal(dataset, con_loader, Anet, Rnet):
 
 
 
-def detect(dataset, data_loader, secret_img, Rnet):
-    secret_img = np.array(secret_img, dtype='int32')
+def detect(dataset, data_loader, secret_img, Dnet, Rnet):
+    #secret_img = np.array(secret_img, dtype='int32')
+    #secret_image = torch.unsqueeze(secret_image, dim=0)
+    Dnet.eval()
 
     if Rnet != None:
         Rnet.eval()
@@ -870,12 +827,19 @@ def detect(dataset, data_loader, secret_img, Rnet):
             for _, rev_secret in enumerate(rev_secret_bath):
                 img_name = os.path.basename(dataset.image_paths[idx])
 
-                rev_secret = tensor2array(rev_secret)
+                #gap = torch.abs(rev_secret - secret_img)
+                gap = rev_secret - secret_img
+                #gap = gap*10 + 0.5#.clamp_(0.0, 1.0)
+                gap = torch.unsqueeze(gap, dim=0)
+                mask = Dnet(gap)
 
-                gap = np.abs(secret_img - rev_secret)
+                #gap = (gap*10 + 0.5).clamp_(0.0, 1.0)
+                gap_img = tensor2img(gap[0])
+                gap_img.save(os.path.join(opt.gap_dir, img_name))
 
-                gap_img = Image.fromarray(gap.astype('uint8'))
-                gap_img.save(os.path.join(opt.mask_pd_dir, img_name))
+                mask_img = tensor2img(mask[0])
+                mask_img.save(os.path.join(opt.mask_pd_dir, img_name))
+
                 idx += 1
     else:
         idx = 0
@@ -885,12 +849,19 @@ def detect(dataset, data_loader, secret_img, Rnet):
             for _, rev_secret in enumerate(rev_secret_batch):
                 img_name = os.path.basename(dataset.image_paths[idx])
 
-                rev_secret = tensor2array(rev_secret)
+                #gap = torch.abs(rev_secret - secret_img)
+                gap = rev_secret - secret_img
+                #gap = (gap*10 + 0.5).clamp_(0.0, 1.0)
+                #gap = gap*10 + 0.5
+                gap = torch.unsqueeze(gap, dim=0)
+                mask = Dnet(gap)
 
-                gap = np.abs(secret_img - rev_secret)
+                gap_img = tensor2img(gap[0])
+                gap_img.save(os.path.join(opt.gap_dir, img_name))
 
-                gap_img = Image.fromarray(gap.astype('uint8'))
-                gap_img.save(os.path.join(opt.mask_pd_dir, img_name))
+                mask_img = tensor2img(mask[0])
+                mask_img.save(os.path.join(opt.mask_pd_dir, img_name))
+
                 idx += 1        
 
 
@@ -944,15 +915,15 @@ def save_result_pic(dis_num, image_dict, epoch, i, save_path):
 
     cover_gap = image_dict['container'] - image_dict['cover']
     cover_gap = (cover_gap*10 + 0.5).clamp_(0.0, 1.0)
-
-    container_gap = image_dict['container'] - image_dict['container_adv']
-    container_gap = (container_gap*10 + 0.5).clamp_(0.0, 1.0)
     
     secret_gap = image_dict['secret_retrieved'] - image_dict['secret_tampered']
     secret_gap = (secret_gap*10 + 0.5).clamp_(0.0, 1.0)
 
-    fig = plt.figure(figsize=(44, 4*dis_num))
-    gs = fig.add_gridspec(nrows=dis_num, ncols=11)
+    mask_gap = image_dict['mask_pd'] - image_dict['mask_gt']
+    mask_gap = (mask_gap*10 + 0.5).clamp_(0.0, 1.0)
+
+    fig = plt.figure(figsize=(48, 4*dis_num))
+    gs = fig.add_gridspec(nrows=dis_num, ncols=12)
     for img_idx in range(dis_num):
         fig.add_subplot(gs[img_idx, 0])
         sec_img = tensor2img(image_dict['secret'][img_idx])
@@ -980,87 +951,39 @@ def save_result_pic(dis_num, image_dict, epoch, i, save_path):
         plt.title("Cover Gap")
 
         fig.add_subplot(gs[img_idx, 5])
-        conadv_img = tensor2img(image_dict['container_adv'][img_idx])
-        plt.imshow(conadv_img)
-        plt.title("container_adv")
-
-        fig.add_subplot(gs[img_idx, 6])
-        congap_img = tensor2img(container_gap[img_idx])
-        plt.imshow(congap_img)
-        plt.title("Container Gap")
-
-        fig.add_subplot(gs[img_idx, 7])
         tamcon_img = tensor2img(image_dict['container_tampered'][img_idx])
         plt.imshow(tamcon_img)
         plt.title("Tampered Container")
 
-        fig.add_subplot(gs[img_idx, 8])
+        fig.add_subplot(gs[img_idx, 6])
         tamsec_img = tensor2img(image_dict['secret_tampered'][img_idx])
         plt.imshow(tamsec_img)
         plt.title("Tampered Secret")
 
-        fig.add_subplot(gs[img_idx, 9])
+        fig.add_subplot(gs[img_idx, 7])
         retsec_img = tensor2img(image_dict['secret_retrieved'][img_idx])
         plt.imshow(retsec_img)
         plt.title("Retrieved Secret")
+
+        fig.add_subplot(gs[img_idx, 8])
+        secgap_img = tensor2img(secret_gap[img_idx])
+        plt.imshow(secgap_img)
+        plt.title("Secret Gap")
+
+        fig.add_subplot(gs[img_idx, 9])
+        maskgt_img = tensor2img(image_dict['mask_gt'][img_idx])
+        plt.imshow(maskgt_img)
+        plt.title("Mask GT")
 
         fig.add_subplot(gs[img_idx, 10])
-        secgap_img = tensor2img(secret_gap[img_idx])
-        plt.imshow(secgap_img)
-        plt.title("Secret Gap")
-    
-    plt.tight_layout()
-    fig.savefig(resultImgName)
-    plt.close(fig)
+        maskpd_img = tensor2img(image_dict['mask_pd'][img_idx])
+        plt.imshow(maskpd_img)
+        plt.title("Mask PD")
 
-
-
-def save_validation_pic(dis_num, image_dict, epoch, i, save_path):
-    resultImgName = os.path.join(save_path, 'ResultPics_epoch{:03d}_batch{:04d}.png'.format(epoch, i))
-
-    cover_gap = image_dict['container'] - image_dict['cover']
-    cover_gap = (cover_gap*10 + 0.5).clamp_(0.0, 1.0)
-    
-    secret_gap = image_dict['secret_retrieved'] - image_dict['secret']
-    secret_gap = (secret_gap*10 + 0.5).clamp_(0.0, 1.0)
-
-    fig = plt.figure(figsize=(28, 4*dis_num))
-    gs = fig.add_gridspec(nrows=dis_num, ncols=7)
-    for img_idx in range(dis_num):
-        fig.add_subplot(gs[img_idx, 0])
-        sec_img = tensor2img(image_dict['secret'][img_idx])
-        plt.imshow(sec_img)
-        plt.title("Secret")
-
-        fig.add_subplot(gs[img_idx, 1])
-        cov_img = tensor2img(image_dict['cover'][img_idx])
-        plt.imshow(cov_img)
-        plt.title("Cover")
-
-        fig.add_subplot(gs[img_idx, 2])
-        wat_img = tensor2img(image_dict['watermark'][img_idx]*10 +0.5)
-        plt.imshow(wat_img)
-        plt.title("Watermark")
-
-        fig.add_subplot(gs[img_idx, 3])
-        con_img = tensor2img(image_dict['container'][img_idx])
-        plt.imshow(con_img)
-        plt.title("Container")
-
-        fig.add_subplot(gs[img_idx, 4])
-        covgap_img = tensor2img(cover_gap[img_idx])
-        plt.imshow(covgap_img)
-        plt.title("Cover Gap")
-
-        fig.add_subplot(gs[img_idx, 5])
-        retsec_img = tensor2img(image_dict['secret_retrieved'][img_idx])
-        plt.imshow(retsec_img)
-        plt.title("Retrieved Secret")
-
-        fig.add_subplot(gs[img_idx, 6])
-        secgap_img = tensor2img(secret_gap[img_idx])
-        plt.imshow(secgap_img)
-        plt.title("Secret Gap")
+        fig.add_subplot(gs[img_idx, 11])
+        maskgap_img = tensor2img(mask_gap[img_idx])
+        plt.imshow(maskgap_img)
+        plt.title("Mask Gap")
     
     plt.tight_layout()
     fig.savefig(resultImgName)

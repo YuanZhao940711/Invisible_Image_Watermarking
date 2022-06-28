@@ -779,6 +779,7 @@ def detect(dataset, data_loader, secret_img, Rnet):
                 rev_secret = tensor2array(rev_secret)
 
                 gap = np.abs(secret_img - rev_secret)
+                #gap = np.clip(np.abs(secret_img - rev_secret) * 256, a_min=0, a_max=255)
 
                 gap_img = Image.fromarray(gap.astype('uint8'))
                 gap_img.save(os.path.join(opt.mask_pd_dir, img_name))
@@ -794,6 +795,7 @@ def detect(dataset, data_loader, secret_img, Rnet):
                 rev_secret = tensor2array(rev_secret)
 
                 gap = np.abs(secret_img - rev_secret)
+                #gap = np.clip(np.abs(secret_img - rev_secret) * 256, a_min=0, a_max=255)
 
                 gap_img = Image.fromarray(gap.astype('uint8'))
                 gap_img.save(os.path.join(opt.mask_pd_dir, img_name))
