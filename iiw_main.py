@@ -27,8 +27,6 @@ def IIW_Main(opt):
     ################## Define global parameters ##################
     #global opt, optimizer, writer, logPath, scheduler, val_loader, smallestLoss
 
-    #opt = parser.parse_args()
-    #opt.Hnet_factor = 1
     opt.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     print("[*]Running on device: {}".format(opt.device))
 

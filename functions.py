@@ -8,8 +8,8 @@ import numpy as np
 
 import torch
 
+from distortion import attack_layer
 from utils.common import AverageMeter, save_result_pic, print_log, tensor2img, tensor2array
-from distortion import random_mask, block_mask, attack_layer
 
 
 
@@ -21,40 +21,33 @@ def forward_pass(opt, secret_img, cover_img, Hnet, Rnet, criterion):
     
     container = watermark + cover
 
-    errH = criterion(container, cover)  # Hiding net
-
-    if opt.mask_mode == 'random':
-        container_tampered, mask = random_mask(opt, container)
-    elif opt.mask_mode == 'block':
-        container_tampered, mask = block_mask(opt, container)
-    elif opt.mask_mode == 'none':
-        container_tampered = container
-        mask = torch.zeros_like(container)
-    else:
-        raise ValueError("Invalid Mask Mode. Must be one of [random, block, none]")
-    
-    if opt.Rloss_mode == 'secret0':
-        tampered = secret * (torch.ones_like(mask) - mask) 
-    elif opt.Rloss_mode == 'secret1':
-        tampered = secret * (torch.ones_like(mask) - mask) + mask
-    elif opt.Rloss_mode == 'mask':
-        tampered = mask
+    errH = criterion(container, cover)  # Hiding net image loss
 
     if opt.attack == 'Yes':
-        #print("attacking...")
-        container_tampered = attack_layer(opt, container_tampered)
+        container_tampered, container_mask = attack_layer(opt, container)
     else:
-        #print("no attacking...")
-        container_tampered = container_tampered
+        container_tampered = container
+        container_mask = torch.zeros_like(container_tampered)
     
-    retrieved = Rnet(container_tampered) 
-    errR = criterion(retrieved, tampered)  # Reveal net
+    if opt.Rloss_mode == 'secret0': # 根据container_mask指示的位置，将secret中“对应”区域的像素置0
+        secret_tampered = secret * (torch.ones_like(container_mask) - container_mask) 
+    elif opt.Rloss_mode == 'secret1': # 根据container_mask指示的位置，将secret中“对应”区域的像素置1
+        secret_tampered = secret * (torch.ones_like(container_mask) - container_mask) + container_mask
+    elif opt.Rloss_mode == 'mask':
+        secret_tampered = container_mask
+    
+    secret_retrieved = Rnet(container_tampered) 
+    errR = criterion(secret_retrieved, secret_tampered)  # Reveal net image loss
 
-    mask_pd = (retrieved-secret).abs() 
-    errM = criterion(mask_pd, mask) # Predicted mask loss
+    container_watermark = torch.ones_like(container_mask) - container_mask
+    secret_watermark = torch.ones_like(secret_retrieved) - (secret - secret_retrieved).abs() 
+    errW = criterion(container_watermark, secret_watermark) # Reveal net watermark loss
 
-    diffH = (container-cover).abs().mean()*255
-    diffR = (retrieved-tampered).abs().mean()*255
+    #mask_pd = (retrieved-secret).abs() 
+    #errM = criterion(mask_pd, mask) # Predicted mask loss
+
+    diffH = (container - cover).abs().mean()*255
+    diffR = (secret_retrieved - secret_tampered).abs().mean()*255
 
     image_dict = {
         'secret': secret,
@@ -62,15 +55,16 @@ def forward_pass(opt, secret_img, cover_img, Hnet, Rnet, criterion):
         'watermark': watermark,
         'container': container,
         'container_tampered': container_tampered,
-        'secret_tampered': tampered,
-        'secret_retrieved': retrieved,
-        'mask_gt': mask,
-        'mask_pd': mask_pd
+        'secret_tampered': secret_tampered,
+        'secret_retrieved': secret_retrieved,
+        'mask_gt': container_mask,
+        'mask_pd': secret_watermark
     }
     data_dict = {
         'errH': errH,
         'errR': errR,
-        'errM': errM,
+        'errW': errW,
+        #'errM': errM,
         'diffH': diffH, 
         'diffR': diffR
     }
@@ -83,7 +77,8 @@ def training(opt, train_loader, epoch, Hnet, Rnet, criterion, optimizer, writer)
     data_time = AverageMeter()
     Hlosses = AverageMeter()  
     Rlosses = AverageMeter() 
-    Mlosses = AverageMeter() 
+    Wlosses = AverageMeter() 
+    #Mlosses = AverageMeter() 
     SumLosses = AverageMeter()
     Hdiff = AverageMeter()
     Rdiff = AverageMeter()
@@ -101,14 +96,14 @@ def training(opt, train_loader, epoch, Hnet, Rnet, criterion, optimizer, writer)
         image_dict, data_dict = forward_pass(opt, secret_img, cover_img, Hnet, Rnet, criterion)
 
         Hlosses.update(data_dict['errH'].data, opt.bs_train)  # H loss
-        Rlosses.update(data_dict['errR'].data, opt.bs_train)  # R loss
-        Mlosses.update(data_dict['errM'].data, opt.bs_train)  # R loss
-        SumLosses.update(data_dict['errH'].data + data_dict['errR'].data + data_dict['errM'].data, opt.bs_train) # H loss + R loss + M Loss
+        Rlosses.update(data_dict['errR'].data, opt.bs_train)  # R image loss
+        Wlosses.update(data_dict['errW'].data, opt.bs_train)  # R watermark loss
+        SumLosses.update(data_dict['errH'].data + data_dict['errR'].data + data_dict['errW'].data, opt.bs_train) # H loss + R loss + M Loss
         Hdiff.update(data_dict['diffH'].data, opt.bs_train)
         Rdiff.update(data_dict['diffR'].data, opt.bs_train)
 
         # Loss, backprop, and optimization step
-        err_sum = data_dict['errH'] + data_dict['errR'] * opt.Rnet_beta + data_dict['errM'] * opt.Rnet_beta
+        err_sum = data_dict['errH'] + data_dict['errR'] * opt.Rnet_beta + data_dict['errW'] * opt.Rnet_beta
         optimizer.zero_grad()
         err_sum.backward()
         optimizer.step()
@@ -117,9 +112,9 @@ def training(opt, train_loader, epoch, Hnet, Rnet, criterion, optimizer, writer)
         batch_time.update(time.time() - start_time)
         start_time = time.time()
 
-        log = '[{:d}/{:d}][{:d}/{:d}] Loss_H: {:.6f} Loss_R: {:.6f} Loss_M: {:.6f} Loss_Sum: {:.6f} L1_H: {:.4f} L1_R: {:.4f} datatime: {:.4f} batchtime: {:.4f}'.format(
+        log = '[{:d}/{:d}][{:d}/{:d}] Loss_H: {:.6f} Loss_R: {:.6f} Loss_W: {:.6f} Loss_Sum: {:.6f} L1_H: {:.4f} L1_R: {:.4f} datatime: {:.4f} batchtime: {:.4f}'.format(
             epoch, opt.max_epoch, i, opt.max_train_iters,
-            Hlosses.val, Rlosses.val, Mlosses.val, SumLosses.val, Hdiff.val, Rdiff.val, 
+            Hlosses.val, Rlosses.val, Wlosses.val, SumLosses.val, Hdiff.val, Rdiff.val, 
             data_time.val, batch_time.val
         )
 
@@ -135,15 +130,15 @@ def training(opt, train_loader, epoch, Hnet, Rnet, criterion, optimizer, writer)
     # To save the last batch only
     save_result_pic(opt.dis_num, image_dict, epoch, i, opt.trainpics)
 
-    epoch_log = "Training[{:d}] Hloss={:.6f} Rloss={:.6f} Mloss={:.6f} SumLoss={:.6f} Hdiff={:.4f} Rdiff={:.4f} lr={:.6f} Epoch time={:.4f}".format(
-        epoch, Hlosses.avg, Rlosses.avg, Mlosses.avg, SumLosses.avg, Hdiff.avg, Rdiff.avg, optimizer.param_groups[0]['lr'], batch_time.sum
+    epoch_log = "Training[{:d}] Hloss={:.6f} Rloss={:.6f} Wloss={:.6f} SumLoss={:.6f} Hdiff={:.4f} Rdiff={:.4f} lr={:.6f} Epoch time={:.4f}".format(
+        epoch, Hlosses.avg, Rlosses.avg, Wlosses.avg, SumLosses.avg, Hdiff.avg, Rdiff.avg, optimizer.param_groups[0]['lr'], batch_time.sum
     )
     print_log(epoch_log, opt.logPath)
 
     writer.add_scalar("lr/lr", optimizer.param_groups[0]['lr'], epoch)
     writer.add_scalar('train/H_loss', Hlosses.avg, epoch)
     writer.add_scalar('train/R_loss', Rlosses.avg, epoch)
-    writer.add_scalar('train/M_loss', Mlosses.avg, epoch)
+    writer.add_scalar('train/W_loss', Wlosses.avg, epoch)
     writer.add_scalar('train/Sum_loss', SumLosses.avg, epoch)
     writer.add_scalar('train/H_diff', Hdiff.avg, epoch)
     writer.add_scalar('train/R_diff', Rdiff.avg, epoch)
@@ -155,7 +150,7 @@ def validation(opt, val_loader, epoch, Hnet, Rnet, criterion, writer):
     batch_time = AverageMeter()
     Hlosses = AverageMeter()
     Rlosses = AverageMeter()  
-    Mlosses = AverageMeter()  
+    Wlosses = AverageMeter()  
     Hdiff = AverageMeter()
     Rdiff = AverageMeter()
 
@@ -166,11 +161,11 @@ def validation(opt, val_loader, epoch, Hnet, Rnet, criterion, writer):
 
     for i, (secret_img, cover_img) in enumerate(val_loader):
 
-        image_dict, data_dict = forward_pass(secret_img, cover_img, Hnet, Rnet, criterion)
+        image_dict, data_dict = forward_pass(opt, secret_img, cover_img, Hnet, Rnet, criterion)
 
         Hlosses.update(data_dict['errH'].data, opt.bs_train)  # H loss
         Rlosses.update(data_dict['errR'].data, opt.bs_train)  # R loss
-        Rlosses.update(data_dict['errM'].data, opt.bs_train)  # M loss
+        Wlosses.update(data_dict['errW'].data, opt.bs_train)  # M loss
         Hdiff.update(data_dict['diffH'].data, opt.bs_train)
         Rdiff.update(data_dict['diffR'].data, opt.bs_train)
         
@@ -180,9 +175,9 @@ def validation(opt, val_loader, epoch, Hnet, Rnet, criterion, writer):
         batch_time.update(time.time() - start_time)
         start_time = time.time()
 
-        val_log = "Validation[{:d}][{:d}/{:d}] val_Hloss = {:.6f} val_Rloss = {:.6f} val_Mloss = {:.6f} val_Hdiff = {:.4f} val_Rdiff={:.4f} batch time={:.4f}".format(
+        val_log = "Validation[{:d}][{:d}/{:d}] val_Hloss = {:.6f} val_Rloss = {:.6f} val_Wloss = {:.6f} val_Hdiff = {:.4f} val_Rdiff={:.4f} batch time={:.4f}".format(
             epoch, i, opt.max_val_iters,
-            Hlosses.val, Rlosses.val, Mlosses.val, Hdiff.val, Rdiff.val, 
+            Hlosses.val, Rlosses.val, Wlosses.val, Hdiff.val, Rdiff.val, 
             batch_time.val
         )
         if i % opt.logFrequency == 0:
@@ -190,18 +185,18 @@ def validation(opt, val_loader, epoch, Hnet, Rnet, criterion, writer):
     
     save_result_pic(opt.dis_num, image_dict, epoch, i, opt.validationpics)
     
-    val_log = "Validation[{:d}] val_Hloss = {:.6f} val_Rloss = {:.6f} val_Mloss = {:.6f} val_Hdiff = {:.4f} val_Rdiff={:.4f} batch time={:.4f}".format(
-        epoch, Hlosses.avg, Rlosses.avg, Mlosses.avg, Hdiff.avg, Rdiff.avg, batch_time.sum)
+    val_log = "Validation[{:d}] val_Hloss = {:.6f} val_Rloss = {:.6f} val_Wloss = {:.6f} val_Hdiff = {:.4f} val_Rdiff={:.4f} batch time={:.4f}".format(
+        epoch, Hlosses.avg, Rlosses.avg, Wlosses.avg, Hdiff.avg, Rdiff.avg, batch_time.sum)
     print_log(val_log, opt.logPath)
 
     writer.add_scalar('validation/H_loss_avg', Hlosses.avg, epoch)
     writer.add_scalar('validation/R_loss_avg', Rlosses.avg, epoch)
-    writer.add_scalar('validation/M_loss_avg', Mlosses.avg, epoch)
+    writer.add_scalar('validation/W_loss_avg', Wlosses.avg, epoch)
     writer.add_scalar('validation/H_diff_avg', Hdiff.avg, epoch)
     writer.add_scalar('validation/R_diff_avg', Rdiff.avg, epoch)
 
     print("#################################################### validation end ####################################################")
-    return Hlosses.avg, Rlosses.avg, Mlosses.avg, Hdiff.avg, Rdiff.avg
+    return Hlosses.avg, Rlosses.avg, Wlosses.avg, Hdiff.avg, Rdiff.avg
 
 
 
@@ -291,6 +286,6 @@ def detection(opt, dataset, data_loader, secret_img, Rnet):
 
                 #gap_img = Image.fromarray(gap.astype('uint8'))
                 gap_img = Image.fromarray(gap.astype('uint8')).convert('L')
-                
+
                 gap_img.save(os.path.join(opt.mask_pd_dir, img_name))
                 idx += 1        

@@ -74,6 +74,7 @@ def block_mask(opt, image):
     return image_masked, masks
 
 
+
 def draw_cicle(image_size, diamiter):
     assert len(image_size) == 2
     TF = np.zeros(image_size,dtype=bool)
@@ -164,15 +165,33 @@ def gaussian_blur(opt, image_batch):
 
 
 def attack_layer(opt, image_batch):
+    """
+    # Low Pass Filter
     if np.random.rand() < 0.25:
         image_batch = lowpass_filter(image_batch).to(opt.device)
-        
+    """
+    mask = torch.zeros_like(image_batch)
+
+    # JPEG Compression
     if np.random.rand() < 0.25:
         image_batch = jpeg_compression(opt, image_batch)
-
+    
+    # Gaussian Blur
     if np.random.rand() < 0.25:
         image_batch = gaussian_blur(opt, image_batch)
+    
+    # Mask
+    if np.random.rand() < 0.25:
+        if opt.mask_mode == 'random':
+            image_batch, mask = random_mask(opt, image_batch)
+        elif opt.mask_mode == 'block':
+            image_batch, mask = block_mask(opt, image_batch)
+        elif opt.mask_mode == 'none':
+            image_batch = image_batch
+            mask = torch.zeros_like(image_batch)
+        else:
+            raise ValueError("[*]Invalid Mask Mode. Must be one of [random, block, none]")
 
     image_pro = image_batch 
 
-    return image_pro
+    return image_pro, mask
