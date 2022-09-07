@@ -16,6 +16,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from options import Options
 from utils.dataset import ImageDataset
+from criteria.lpips.lpips import LPIPS
 from models.HidingNet import UNetDeep, UNetShallow
 from models.RevealNet import FullConvSkip, FullConv, TransConv
 from functions import training, validation, generation, revealing, detection
@@ -169,16 +170,30 @@ def IIW_Main(opt):
             Rnet.apply(weights_init)
 
         # Loss and Metric
+        """
         if opt.loss == 'l1':
             criterion = nn.L1Loss().to(opt.device)
         elif opt.loss == 'l2':
             criterion = nn.MSELoss().to(opt.device)
         else:
             raise ValueError("[*]Invalid Loss Function. Must be one of [l1, l2]")
+        """
+        criterion_dict = {
+            'Hnet_loss' : nn.MSELoss().to(opt.device),
+            #'Hnet_loss' : LPIPS(net_type='alex').to(opt.device).eval(),
+            'Rnet_imgloss' : nn.MSELoss().to(opt.device),
+            'Rnet_watloss' : nn.MSELoss().to(opt.device),
+            #'Dnet_loss' : GANLoss().to(opt.device)
+        }
         
         params = list(Hnet.parameters())+list(Rnet.parameters())
         optimizer = optim.Adam(params, lr=opt.lr, betas=(opt.beta_adam, 0.999))
         scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.2, patience=8, verbose=True)
+        """
+        opt_Hnet = optim.Adam(Hnet.parameters(), lr=opt.lr, betas=(opt.beta_adam, 0.999))
+        opt_Rnet = optim.Adam(Rnet.parameters(), lr=opt.lr, betas=(opt.beta_adam, 0.999))
+        scheduler = ReduceLROnPlateau(opt_Rnet, mode='min', factor=0.2, patience=8, verbose=True)
+        """
 
         train_loader_cover = DataLoader(
             train_dataset_cover,
@@ -203,22 +218,27 @@ def IIW_Main(opt):
         print_log("Training is beginning .......................................................", opt.logPath)
         for epoch in range(opt.max_epoch):
             adjust_learning_rate(opt, optimizer, epoch)
+            #adjust_learning_rate(opt, opt_Hnet, epoch)
+            #adjust_learning_rate(opt, opt_Rnet, epoch)
 
             train_loader = zip(secret_loader, train_loader_cover)
             val_loader = zip(secret_loader, val_loader_cover)
 
             ################## training ##################
-            training(opt, train_loader, epoch, Hnet=Hnet, Rnet=Rnet, criterion=criterion, optimizer=optimizer, writer=writer)
+            training(opt, train_loader, epoch, Hnet=Hnet, Rnet=Rnet, criterion_dict=criterion_dict, optimizer=optimizer, writer=writer)
+            #training(opt, train_loader, epoch, Hnet=Hnet, Rnet=Rnet, criterion=criterion, opt_Hnet=opt_Hnet, opt_Rnet=opt_Rnet, writer=writer)
 
             ################## validation  ##################
             with torch.no_grad():
-                val_hloss, val_rloss, val_mloss, val_hdiff, val_rdiff = validation(opt, val_loader, epoch, Hnet=Hnet, Rnet=Rnet, criterion=criterion, writer=writer)
+                #val_hloss, val_rloss, val_mloss, val_hdiff, val_rdiff = validation(opt, val_loader, epoch, Hnet=Hnet, Rnet=Rnet, criterion=criterion, writer=writer)
+                losses_dict = validation(opt, val_loader, epoch, Hnet=Hnet, Rnet=Rnet, criterion_dict=criterion_dict, writer=writer)
 
             ################## adjust learning rate ##################
-            scheduler.step(val_rloss) # 注意！这里只用 R 网络的 loss 进行 learning rate 的更新
+            scheduler.step(losses_dict['RIlosses']) # 注意！这里只用 R 网络的 loss 进行 learning rate 的更新
 
             # Save the best model parameters
-            sum_diff = val_hdiff + val_rdiff
+            #sum_diff = val_hdiff + val_rdiff
+            sum_diff = losses_dict['Cdiff'] + losses_dict['Sdiff']
             """
             is_best = sum_diff < globals()["smallestLoss"]
             globals()["smallestLoss"] = sum_diff
@@ -230,7 +250,7 @@ def IIW_Main(opt):
                 'epoch': epoch + 1,
                 'H_state_dict': Hnet.state_dict(),
                 'R_state_dict': Rnet.state_dict(),
-                'optimizer' : optimizer.state_dict(),
+                #'optimizer' : optimizer.state_dict(),
             }
 
             save_checkpoint(opt, stat_dict, is_best)
