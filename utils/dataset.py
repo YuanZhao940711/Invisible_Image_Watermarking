@@ -50,7 +50,7 @@ class QRCodeDataset(Dataset):
     
     def __getitem__(self, index):
         np.random.seed(index)
-        bit_size = 8
+        bit_size = 16
         bit_number = self.opt.imageSize // bit_size
         
         random_bits = np.random.randint(low=0, high=2, size=(bit_number, bit_number))
@@ -59,8 +59,9 @@ class QRCodeDataset(Dataset):
 
         random_bits = np.stack((random_bits, random_bits, random_bits), 0)
         
-        random_bits = (random_bits * 255).astype('uint8')
+        random_bits = (random_bits * 255).astype('uint8').transpose([1,2,0])
 
-        random_bits_img = Image.fromarray(random_bits, 'RGB')#.convert("RGB")
+        #random_bits_img = Image.fromarray(random_bits, 'RGB')#.convert("RGB")
+        random_bits_img = Image.fromarray(random_bits)#.convert("RGB")
 
         return self.transforms(random_bits_img)
