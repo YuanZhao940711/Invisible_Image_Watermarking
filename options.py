@@ -49,7 +49,9 @@ class Options:
 
         self.parser.add_argument('--gen_mode', type=str, default='white', help='white | random | same')
 
-        self.parser.add_argument('--mask_mode', type=str, default='random', help='random | block | none')
+        self.parser.add_argument('--secret_mode', type=str, default='RGB', help='RGB | Gray | QRCode')
+
+        self.parser.add_argument('--mask_mode', type=str, default='random', help='random | block | none | mixed')
         self.parser.add_argument('--block_size', type=int, default=32, help='bigger block size correspond to smaller masked block')
         self.parser.add_argument('--block_ratio', type=float, default=0.5, help='')
 

@@ -15,31 +15,38 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from options import Options
-from utils.dataset import ImageDataset
+from utils.dataset import QRCodeDataset, ImageDataset
 from criteria.lpips.lpips import LPIPS
 from models.HidingNet import UNetDeep, UNetShallow
 from models.RevealNet import FullConvSkip, FullConv, TransConv
 from functions import training, validation, generation, revealing, detection
-from utils.common import print_log, weights_init, adjust_learning_rate, save_checkpoint
+from utils.common import print_log, weights_init, save_checkpoint, save_best_result_pic
 
 
 
 def IIW_Main(opt):
-    ################## Define global parameters ##################
-    #global opt, optimizer, writer, logPath, scheduler, val_loader, smallestLoss
-
     opt.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     print("[*]Running on device: {}".format(opt.device))
 
     ##################  Create the dirs to save the result ##################
     cur_time = time.strftime('%Y%m%dH%H%M%S', time.localtime())
+
+    if opt.secret_mode == 'Gray':
+        assert opt.Hnet_inchannel == 1, '[*]Secret mode is [Gray], please set the input channel of Hnet as 1!'
+    elif opt.secret_mode == 'RGB':
+        assert opt.Hnet_inchannel == 3, '[*]Secret mode is [RGB], please set the input channel of Hnet as 3!'
+    else:
+        assert opt.secret_mode == 'QRCode', '[*]Please set correct secrect mode, must be one of [RGB, Gray, QRCode]!'
+
     assert opt.Hnet_inchannel == opt.Rnet_outchannel, '[*]Please make sure the channel of input secret image equal to the extracted secret image!'
 
     if opt.mode == 'train':
         Hnet_comment = 'Hnet{}IC{}OC{}'.format(opt.Hnet_mode, opt.Hnet_inchannel, opt.Hnet_outchannel)
         Rnet_comment = 'Rnet{}IC{}OC{}'.format(opt.Rnet_mode, opt.Rnet_inchannel, opt.Rnet_outchannel)
 
-        opt.experiment_dir = os.path.join(opt.output_dir, cur_time+"_"+str(opt.imageSize)+"_"+opt.norm+"_"+opt.loss+"_"+opt.Rloss_mode+"_"+Hnet_comment+"_"+Rnet_comment+"_"+str(opt.Hnet_factor)+"_"+opt.mask_mode+"_"+opt.attack)
+        opt.experiment_dir = os.path.join(opt.output_dir, \
+            cur_time+"_"+str(opt.imageSize)+"_"+opt.norm+"_"+opt.loss+"_"+opt.Rloss_mode+"_"+Hnet_comment+"_"+Rnet_comment+"_"+str(opt.Hnet_factor)+"_"+opt.attack+"_"+opt.mask_mode+"_"+opt.secret_mode)
+
         print("[*]Saving the experiment results at {}".format(opt.experiment_dir))
 
         opt.jpegtemp = os.path.join(opt.experiment_dir, 'JpegTemp')
@@ -105,9 +112,10 @@ def IIW_Main(opt):
         norm_layer = None
     else:
         raise ValueError("[*]Invalid norm option. Must be one of [instance, batch, none]") 
-
+######################################################################################################################################################
     if opt.mode == 'train':
-        if opt.Hnet_inchannel == 1:  
+        ##### Initialize dataloader #####
+        if opt.Hnet_inchannel == 1:
             transforms_secret = transforms.Compose([
                 transforms.Grayscale(num_output_channels=1),
                 transforms.Resize([opt.imageSize, opt.imageSize]), 
@@ -129,11 +137,18 @@ def IIW_Main(opt):
             transforms_cover = transforms.Compose([
                 transforms.Resize([opt.imageSize, opt.imageSize]), 
                 transforms.ToTensor()
-            ])    
+            ])
 
-        secret_dataset = ImageDataset(
-            root = opt.secret_dir,
-            transforms = transforms_secret)
+        if opt.secret_mode == 'QRCode':
+            secret_dataset = QRCodeDataset(
+                opt = opt,
+                transforms = transforms_secret
+            )
+        else:
+            secret_dataset = ImageDataset(
+                root = opt.secret_dir,
+                transforms = transforms_secret
+            )
         train_dataset_cover = ImageDataset(
             root = opt.train_dir,
             transforms = transforms_cover)
@@ -141,6 +156,26 @@ def IIW_Main(opt):
             root = opt.val_dir,
             transforms = transforms_cover)
 
+        train_loader_cover = DataLoader(
+            train_dataset_cover,
+            batch_size=opt.bs_train,
+            shuffle=True,
+            num_workers=int(opt.workers)
+        )
+        secret_loader = DataLoader(
+            secret_dataset,
+            batch_size=opt.bs_train,
+            shuffle=True,
+            num_workers=int(opt.workers)
+        )
+        val_loader_cover = DataLoader(
+            val_dataset_cover,
+            batch_size=opt.bs_train,
+            shuffle=False,
+            num_workers=int(opt.workers)
+        )
+        
+        ##### Initialize Network architecture #####
         if opt.Hnet_mode == 'UNetDeep':
             Hnet = UNetDeep(input_nc=opt.Hnet_inchannel, output_nc=opt.Hnet_outchannel, norm_layer=norm_layer, output_function=nn.Sigmoid()).to(opt.device)
         elif opt.Hnet_mode == 'UNetShallow':
@@ -170,93 +205,59 @@ def IIW_Main(opt):
             Rnet.apply(weights_init)
 
         # Loss and Metric
-        """
-        if opt.loss == 'l1':
-            criterion = nn.L1Loss().to(opt.device)
-        elif opt.loss == 'l2':
-            criterion = nn.MSELoss().to(opt.device)
-        else:
-            raise ValueError("[*]Invalid Loss Function. Must be one of [l1, l2]")
-        """
         criterion_dict = {
             'Hnet_loss' : nn.MSELoss().to(opt.device),
             #'Hnet_loss' : LPIPS(net_type='alex').to(opt.device).eval(),
             'Rnet_imgloss' : nn.MSELoss().to(opt.device),
             'Rnet_watloss' : nn.MSELoss().to(opt.device),
-            #'Dnet_loss' : GANLoss().to(opt.device)
         }
-        
-        params = list(Hnet.parameters())+list(Rnet.parameters())
-        optimizer = optim.Adam(params, lr=opt.lr, betas=(opt.beta_adam, 0.999))
-        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.2, patience=8, verbose=True)
-        """
+
         opt_Hnet = optim.Adam(Hnet.parameters(), lr=opt.lr, betas=(opt.beta_adam, 0.999))
         opt_Rnet = optim.Adam(Rnet.parameters(), lr=opt.lr, betas=(opt.beta_adam, 0.999))
-        scheduler = ReduceLROnPlateau(opt_Rnet, mode='min', factor=0.2, patience=8, verbose=True)
-        """
-
-        train_loader_cover = DataLoader(
-            train_dataset_cover,
-            batch_size=opt.bs_train,
-            shuffle=True,
-            num_workers=int(opt.workers)
-        )
-        secret_loader = DataLoader(
-            secret_dataset,
-            batch_size=opt.bs_train,
-            shuffle=True,
-            num_workers=int(opt.workers)
-        )
-        val_loader_cover = DataLoader(
-            val_dataset_cover,
-            batch_size=opt.bs_train,
-            shuffle=False,
-            num_workers=int(opt.workers)
-        )
+        optimizer_dict = {
+            'opt_Hnet' : opt_Hnet,
+            'opt_Rnet' : opt_Rnet
+        }
+        
+        Hnet_scheduler = ReduceLROnPlateau(opt_Hnet, mode='min', factor=0.2, patience=8, verbose=True)
+        Rnet_scheduler = ReduceLROnPlateau(opt_Rnet, mode='min', factor=0.2, patience=8, verbose=True)
+        scheduler_dict = {
+            'Hnet_scheduler' : Hnet_scheduler,
+            'Rnet_scheduler' : Rnet_scheduler
+        }
 
         smallestLoss = 10000
         print_log("Training is beginning .......................................................", opt.logPath)
         for epoch in range(opt.max_epoch):
-            adjust_learning_rate(opt, optimizer, epoch)
-            #adjust_learning_rate(opt, opt_Hnet, epoch)
-            #adjust_learning_rate(opt, opt_Rnet, epoch)
+            #adjust_learning_rate(opt, optimizer, epoch)
 
             train_loader = zip(secret_loader, train_loader_cover)
             val_loader = zip(secret_loader, val_loader_cover)
 
-            ################## training ##################
-            training(opt, train_loader, epoch, Hnet=Hnet, Rnet=Rnet, criterion_dict=criterion_dict, optimizer=optimizer, writer=writer)
-            #training(opt, train_loader, epoch, Hnet=Hnet, Rnet=Rnet, criterion=criterion, opt_Hnet=opt_Hnet, opt_Rnet=opt_Rnet, writer=writer)
+            #################### training ####################
+            training(opt, train_loader, epoch, Hnet=Hnet, Rnet=Rnet, criterion_dict=criterion_dict, optimizer_dict=optimizer_dict, writer=writer, scheduler_dict=scheduler_dict)
 
-            ################## validation  ##################
+            #################### validation  ####################
             with torch.no_grad():
-                #val_hloss, val_rloss, val_mloss, val_hdiff, val_rdiff = validation(opt, val_loader, epoch, Hnet=Hnet, Rnet=Rnet, criterion=criterion, writer=writer)
                 losses_dict = validation(opt, val_loader, epoch, Hnet=Hnet, Rnet=Rnet, criterion_dict=criterion_dict, writer=writer)
 
-            ################## adjust learning rate ##################
-            scheduler.step(losses_dict['RIlosses']) # 注意！这里只用 R 网络的 loss 进行 learning rate 的更新
-
             # Save the best model parameters
-            #sum_diff = val_hdiff + val_rdiff
             sum_diff = losses_dict['Cdiff'] + losses_dict['Sdiff']
-            """
-            is_best = sum_diff < globals()["smallestLoss"]
-            globals()["smallestLoss"] = sum_diff
-            """
             is_best = sum_diff < smallestLoss
+            if is_best:
+                save_best_result_pic(opt, val_loader, Hnet, Rnet)
             smallestLoss = sum_diff
 
             stat_dict = {
                 'epoch': epoch + 1,
                 'H_state_dict': Hnet.state_dict(),
-                'R_state_dict': Rnet.state_dict(),
-                #'optimizer' : optimizer.state_dict(),
+                'R_state_dict': Rnet.state_dict()
             }
 
             save_checkpoint(opt, stat_dict, is_best)
         
         writer.close()
-
+######################################################################################################################################################
     elif opt.mode == 'generate':
         if opt.Hnet_inchannel == 1:
             transforms_secret = transforms.Compose([
@@ -311,7 +312,7 @@ def IIW_Main(opt):
         )
         with torch.no_grad():
             generation(opt, dataset=cover_dataset, cov_loader=cover_loader, secret_img=secret_image, Hnet=Hnet)        
-
+######################################################################################################################################################
     elif opt.mode == 'reveal':
         if opt.Rnet_inchannel == 1:
             transforms_container = transforms.Compose([
@@ -350,7 +351,7 @@ def IIW_Main(opt):
         )
         with torch.no_grad():
             revealing(opt=opt, dataset=container_dataset, con_loader=container_loader, Rnet=Rnet)   
-
+######################################################################################################################################################
     elif opt.mode == 'detect':
         print('[*]Load the secret image from: {}'.format(opt.secret_dir))
         secret_image = Image.open(opt.secret_dir).convert('RGB')

@@ -180,7 +180,7 @@ def attack_layer(opt, image_batch):
     if np.random.rand() < 0.25:
         image_batch = gaussian_blur(opt, image_batch)
     
-    # Mask
+    # Random Mask
     if np.random.rand() < 0.25:
         if opt.mask_mode == 'random':
             image_batch, mask = random_mask(opt, image_batch)
@@ -189,8 +189,12 @@ def attack_layer(opt, image_batch):
         elif opt.mask_mode == 'none':
             image_batch = image_batch
             mask = torch.zeros_like(image_batch)
+        elif opt.mask_mode == 'mixed':
+            image_batch, mask_random = random_mask(opt, image_batch)
+            image_batch, mask_block = block_mask(opt, image_batch)
+            mask = mask_random + mask_block
         else:
-            raise ValueError("[*]Invalid Mask Mode. Must be one of [random, block, none]")
+            raise ValueError("[*]Invalid Mask Mode. Must be one of [random, block, none, mixed]")
 
     image_pro = image_batch 
 

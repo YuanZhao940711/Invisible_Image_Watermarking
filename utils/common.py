@@ -159,6 +159,71 @@ def save_result_pic(dis_num, image_dict, epoch, i, save_path):
 
 
 
+def save_best_result_pic(opt, loader, Hnet, Rnet):
+    BestResultName = os.path.join(opt.outckpts, 'BestResultPics.png')
+
+    secret_batch, cover_batch = next(iter(loader))
+
+    secret = secret_batch.to(opt.device)
+    cover = cover_batch.to(opt.device)
+
+    watermark = Hnet(secret) * opt.Hnet_factor
+
+    container = watermark + cover
+
+    secret_retrieved = Rnet(container)
+
+    cover_gap = container - cover
+    cover_gap = (cover_gap*10 + 0.5).clamp_(0.0, 1.0)
+    
+    secret_gap = secret_retrieved - secret
+    secret_gap = (secret_gap*10 + 0.5).clamp_(0.0, 1.0)
+
+    fig = plt.figure(figsize=(28, 4*opt.dis_num))
+    gs = fig.add_gridspec(nrows=opt.dis_num, ncols=7)
+
+    for img_idx in range(opt.dis_num):
+        fig.add_subplot(gs[img_idx, 0])
+        sec_img = tensor2img(secret[img_idx])
+        plt.imshow(sec_img)
+        plt.title("Secret")
+
+        fig.add_subplot(gs[img_idx, 1])
+        cov_img = tensor2img(cover[img_idx])
+        plt.imshow(cov_img)
+        plt.title("Cover")
+
+        fig.add_subplot(gs[img_idx, 2])
+        wat_img = tensor2img(watermark[img_idx]*10 +0.5)
+        plt.imshow(wat_img)
+        plt.title("Watermark")
+
+        fig.add_subplot(gs[img_idx, 3])
+        con_img = tensor2img(container[img_idx])
+        plt.imshow(con_img)
+        plt.title("Container")
+
+        fig.add_subplot(gs[img_idx, 4])
+        covgap_img = tensor2img(cover_gap[img_idx])
+        plt.imshow(covgap_img)
+        plt.title("Cover Gap")
+
+        fig.add_subplot(gs[img_idx, 5])
+        retsec_img = tensor2img(secret_retrieved[img_idx])
+        plt.imshow(retsec_img)
+        plt.title("Retrieved Secret")
+
+        fig.add_subplot(gs[img_idx, 6])
+        secgap_img = tensor2img(secret_gap[img_idx])
+        plt.imshow(secgap_img)
+        plt.title("Secret Gap")
+
+    plt.tight_layout()
+    fig.savefig(BestResultName)
+    plt.close(fig)
+
+
+
 class AverageMeter(object):
     def __init__(self):
         self.reset()

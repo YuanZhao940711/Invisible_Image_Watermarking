@@ -25,10 +25,8 @@ def forward_pass(opt, secret_img, cover_img, Hnet, Rnet, criterion_dict):
 
     if opt.attack == 'Yes':
         container_tampered, container_mask = attack_layer(opt, container)
-        #container_tampered, container_mask = attack_layer(opt, container.data)
     else:
         container_tampered = container
-        #container_tampered = container.data
         container_mask = torch.zeros_like(container_tampered)
     
     if opt.Rloss_mode == 'secret0': # 根据container_mask指示的位置，将secret中“对应”区域的像素置0
@@ -72,8 +70,8 @@ def forward_pass(opt, secret_img, cover_img, Hnet, Rnet, criterion_dict):
     return image_dict, data_dict
 
 
-#def training(opt, train_loader, epoch, Hnet, Rnet, criterion_dict, opt_Hnet, opt_Rnet, writer):
-def training(opt, train_loader, epoch, Hnet, Rnet, criterion_dict, optimizer, writer):
+
+def training(opt, train_loader, epoch, Hnet, Rnet, criterion_dict, optimizer_dict, writer, scheduler_dict):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     Hlosses = AverageMeter()  
@@ -104,23 +102,12 @@ def training(opt, train_loader, epoch, Hnet, Rnet, criterion_dict, optimizer, wr
         Sdiff.update(data_dict['diffS'].data, opt.bs_train)
 
         # Loss, backprop, and optimization step
-        """
-        # Hnet
-        errH = data_dict['errH']
-        opt_Hnet.zero_grad()
-        errH.backward()
-        opt_Hnet.step()
-
-        # Rnet
-        errRsum = (data_dict['errR_img'] + data_dict['errR_wat']) * opt.Rnet_beta
-        opt_Rnet.zero_grad()
-        errRsum.backward()
-        opt_Rnet.step()
-        """
         err_sum = data_dict['errH'] + (data_dict['errR_img'] + data_dict['errR_wat']) * opt.Rnet_beta
-        optimizer.zero_grad()
+        optimizer_dict['opt_Hnet'].zero_grad()
+        optimizer_dict['opt_Rnet'].zero_grad()        
         err_sum.backward()
-        optimizer.step()
+        optimizer_dict['opt_Hnet'].step()
+        optimizer_dict['opt_Rnet'].step()
 
         # Time spent on one batch
         batch_time.update(time.time() - start_time)
@@ -141,18 +128,21 @@ def training(opt, train_loader, epoch, Hnet, Rnet, criterion_dict, optimizer, wr
         if i == opt.max_train_iters-1:
             break
 
+    scheduler_dict['Hnet_scheduler'].step(Hlosses.avg) 
+    scheduler_dict['Rnet_scheduler'].step(RIlosses.avg + RWlosses.avg) 
+
     # To save the last batch only
     save_result_pic(opt.dis_num, image_dict, epoch, i, opt.trainpics)
 
-    epoch_log = "Training[{:d}] Hloss={:.6f} R(img)loss={:.6f} R(wat)loss={:.6f} SumLoss={:.6f} Cdiff={:.4f} Sdiff={:.4f} lr={:.6f} Epoch time={:.4f}".format(
+    epoch_log = "Training[{:d}] Hloss={:.6f} R(img)loss={:.6f} R(wat)loss={:.6f} SumLoss={:.6f} Cdiff={:.4f} Sdiff={:.4f} H_lr={:.6f} R_lr={:.6f} Epoch time={:.4f}".format(
         epoch, Hlosses.avg, RIlosses.avg, RWlosses.avg, SumLosses.avg, Cdiff.avg, Sdiff.avg, 
-        optimizer.param_groups[0]['lr'], batch_time.sum
+        optimizer_dict['opt_Hnet'].param_groups[0]['lr'], optimizer_dict['opt_Rnet'].param_groups[0]['lr'], 
+        batch_time.sum
     )
     print_log(epoch_log, opt.logPath)
 
-    #writer.add_scalar("lr/H_lr", opt_Hnet.param_groups[0]['lr'], epoch)
-    #writer.add_scalar("lr/R_lr", opt_Rnet.param_groups[0]['lr'], epoch)
-    writer.add_scalar("lr/lr", optimizer.param_groups[0]['lr'], epoch)
+    writer.add_scalar("lr/H_lr", optimizer_dict['opt_Hnet'].param_groups[0]['lr'], epoch)
+    writer.add_scalar("lr/R_lr", optimizer_dict['opt_Rnet'].param_groups[0]['lr'], epoch)    
     writer.add_scalar('train/H_loss', Hlosses.avg, epoch)
     writer.add_scalar('train/R_img_loss', RIlosses.avg, epoch)
     writer.add_scalar('train/R_wat_loss', RWlosses.avg, epoch)
