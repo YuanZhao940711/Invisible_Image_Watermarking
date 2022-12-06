@@ -2,6 +2,7 @@
 
 import os
 import time
+import numpy as np
 
 from PIL import Image
 
@@ -99,7 +100,8 @@ def IIW_Main(opt):
         opt.experiment_dir = opt.output_dir
         print("[*]Saving the detection results at {}".format(opt.experiment_dir))
 
-        opt.mask_pd_dir = os.path.join(opt.experiment_dir, "mask_pd")
+        #opt.mask_pd_dir = os.path.join(opt.experiment_dir, "mask_pd")
+        opt.mask_pd_dir = opt.experiment_dir
         print("[*]Export the predict masks at: {}".format(opt.mask_pd_dir))
         os.makedirs(opt.mask_pd_dir, exist_ok=True)
 
@@ -285,8 +287,27 @@ def IIW_Main(opt):
 
         cover_dataset = ImageDataset(root=opt.cover_dir, transforms=transforms_cover)
 
-        print('[*]Load the secret image from: {}'.format(opt.secret_dir))
-        secret_image = Image.open(opt.secret_dir).convert('RGB')
+        if opt.secret_mode == 'QRCode':
+            np.random.seed(5)
+            bit_size = 16
+            bit_number = opt.imageSize // bit_size
+            
+            random_bits = np.random.randint(low=0, high=2, size=(bit_number, bit_number))
+            random_bits = np.repeat(random_bits, bit_size, 0)
+            random_bits = np.repeat(random_bits, bit_size, 1)
+
+            random_bits = np.stack((random_bits, random_bits, random_bits), 0)
+            
+            random_bits = (random_bits * 255).astype('uint8').transpose([1,2,0])
+
+            secret_image = Image.fromarray(random_bits)
+        else:
+            print('[*]Load the secret image from: {}'.format(opt.secret_dir))
+            if opt.secret_mode == 'Gray':
+                secret_image = Image.open(opt.secret_dir).convert('L')
+            else:
+                secret_image = Image.open(opt.secret_dir).convert('RGB')
+
         secret_image = secret_image.resize((opt.imageSize, opt.imageSize))
         secret_image.save(os.path.join(opt.experiment_dir, 'secret_image.png'))
         secret_image = transforms_secret(secret_image).to(opt.device)
@@ -354,7 +375,10 @@ def IIW_Main(opt):
 ######################################################################################################################################################
     elif opt.mode == 'detect':
         print('[*]Load the secret image from: {}'.format(opt.secret_dir))
-        secret_image = Image.open(opt.secret_dir).convert('RGB')
+        if opt.secret_mode == 'Gray':
+            secret_image = Image.open(opt.secret_dir).convert('L')
+        else:
+            secret_image = Image.open(opt.secret_dir).convert('RGB')
         secret_image = secret_image.resize((opt.imageSize, opt.imageSize))
 
         if opt.Rnet_inchannel == 1:
